@@ -34,8 +34,8 @@ from pathlib import Path
 # =============================================================================
 #  CONFIGURAÇÃO — ajuste estas três linhas para o seu repositório
 # =============================================================================
-GH_USER = "SEU_USUARIO"
-GH_REPO = "pybr2026-drift"
+GH_USER = "arcursino"
+GH_REPO = "python-br-2026"
 TAG_DADOS = "dados-v1"  # tag do Release que contém os .parquet
 
 REPO_URL = f"https://github.com/{GH_USER}/{GH_REPO}.git"
