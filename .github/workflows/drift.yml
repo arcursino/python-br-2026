@@ -1,0 +1,189 @@
+# =============================================================================
+# .github/workflows/drift.yml
+#
+#  A "esteira de MLOps" prometida na ementa — e a prova de que a guarda 5
+#  não é filosofia.
+#
+#  O passo que importa é o ÚLTIMO: quando `driftkit decide` devolve exit 20,
+#  este workflow NÃO retreina. Ele abre uma issue para a engenharia de
+#  processo. Um pipeline que sabe se recusar a retreinar é mais maduro que
+#  um que retreina rápido.
+#
+#  Rode isto no seu repositório ANTES do evento, com uma janela que dispara
+#  o exit 20, e deixe a issue aberta. Projete a issue real, criada por robô,
+#  em vez de um slide dizendo que seria possível.
+# =============================================================================
+name: monitor de drift
+
+on:
+  schedule:
+    - cron: "0 6 * * *"        # todo dia às 06:00 UTC — o "automatizado" da ementa
+  workflow_dispatch:
+    inputs:
+      janela:
+        description: "Caminho do parquet da janela a avaliar"
+        default: "data/janela_atual.parquet"
+      dia:
+        description: "Dia/período (habilita as guardas de persistência e cooldown)"
+        default: ""
+
+permissions:
+  contents: write        # para commitar o histórico de decisões
+  issues: write          # para abrir o ticket de engenharia
+
+concurrency:
+  group: drift-monitor
+  cancel-in-progress: false    # decisões são sequenciais: a guarda 1 depende do passado
+
+jobs:
+  monitorar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: instalar uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: instalar dependências
+        run: uv sync --extra dev
+
+      # -- portão de qualidade -------------------------------------------------
+      # A suíte roda ANTES da decisão. Um detector com teste vermelho não
+      # decide nada — é o argumento central do tutorial aplicado a si mesmo.
+      - name: suíte do detector
+        run: uv run pytest -q -m "not lento and not requer_bosch and not mercado"
+
+      - name: baixar dados da janela
+        run: |
+          mkdir -p data
+          if [ ! -f "data/detector_config.json" ]; then
+            uv run driftkit calibrar --saida data/detector_config.json
+          fi
+
+      # -- medir (não decide) --------------------------------------------------
+      - name: medir drift
+        run: uv run driftkit check "${{ inputs.janela || 'data/janela_atual.parquet' }}"
+
+      # -- decidir: o exit code É a política -----------------------------------
+      #  0 nada | 10 retreinar | 20 BLOQUEAR | 30 insuficiente
+      - name: decidir
+        id: decisao
+        continue-on-error: true      # 20 não é falha de build, é uma DECISÃO
+        run: |
+          set +e
+          uv run driftkit decide "${{ inputs.janela || 'data/janela_atual.parquet' }}" \
+            ${{ inputs.dia && format('--dia {0}', inputs.dia) || '' }} \
+            --json > decisao.json
+          CODE=$?
+          echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Decisão do monitor de drift"
+            echo ""
+            echo '```json'
+            cat decisao.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      # =====================================================================
+      #  exit 10 — retreino APROVADO
+      # =====================================================================
+      - name: retreinar (aprovado pela política)
+        if: steps.decisao.outputs.exit_code == '10'
+        run: |
+          uv run driftkit retrain "${{ inputs.janela || 'data/janela_atual.parquet' }}"
+
+      - name: publicar challenger
+        if: steps.decisao.outputs.exit_code == '10'
+        uses: actions/upload-artifact@v4
+        with:
+          name: challenger-${{ github.run_number }}
+          path: models/
+
+      # =====================================================================
+      #  exit 20 — retreino BLOQUEADO. O passo que não existe em outros pipelines.
+      # =====================================================================
+      - name: abrir ticket de engenharia de processo
+        if: steps.decisao.outputs.exit_code == '20'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const d = JSON.parse(fs.readFileSync('decisao.json', 'utf8'));
+            const destino = d.causa === 'hardware'
+              ? 'Metrologia / Manutenção'
+              : 'Engenharia de Dados';
+            const guardas = Object.entries(d.guardas)
+              .map(([k, v]) => `| ${k} | ${v ? '✅ passa' : '⛔ BLOQUEIA'} |`)
+              .join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `⛔ Drift com causa não-ML — retreino bloqueado (${d.causa})`,
+              labels: ['drift', 'engenharia-de-processo', `causa:${d.causa}`],
+              body: [
+                '## Retreino BLOQUEADO automaticamente',
+                '',
+                `**Causa provável:** \`${d.causa}\``,
+                `**Encaminhar para:** ${destino}`,
+                '',
+                `> ${d.motivo}`,
+                '',
+                '### Guardas',
+                '| guarda | resultado |',
+                '|---|---|',
+                guardas,
+                '',
+                '### Evidências',
+                '```json',
+                JSON.stringify(d.evidencias, null, 2),
+                '```',
+                '',
+                '---',
+                '⚠️ **Isto não é um bug do pipeline.** As quatro guardas clássicas de',
+                'MLOps passaram. Elas foram desenhadas para impedir retreino',
+                '*desnecessário*; nenhuma foi desenhada para impedir retreino',
+                '*danoso* — porque danoso e necessário são indistinguíveis por',
+                'qualquer métrica de ML. A distinção é física.',
+                '',
+                'Retreinar aqui institucionalizaria o defeito dentro do modelo:',
+                'o dashboard ficaria verde e o processo continuaria fora de',
+                'especificação, até que a correção física quebrasse o modelo.',
+                '',
+                `_gerado por [run #${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})_`,
+              ].join('\n'),
+            });
+
+      # =====================================================================
+      #  exit 30 — dados insuficientes. Registrar, jamais silenciar.
+      # =====================================================================
+      - name: avisar dados insuficientes
+        if: steps.decisao.outputs.exit_code == '30'
+        run: |
+          echo "::warning title=Janela não mensurável::Sem observações suficientes \
+          para decidir. ATENÇÃO: isto NÃO é 'sem drift'."
+
+      # -- memória: as guardas 1 e 2b dependem do histórico --------------------
+      - name: persistir histórico de decisões
+        if: always()
+        run: |
+          git config user.name  "driftkit-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -f data/historico_decisoes.jsonl || true
+          git diff --staged --quiet || \
+            git commit -m "chore(drift): decisão exit=${{ steps.decisao.outputs.exit_code }} [skip ci]"
+          git push || true
+
+      - name: falhar o job apenas em erro real
+        if: steps.decisao.outputs.exit_code != '0' &&
+            steps.decisao.outputs.exit_code != '10' &&
+            steps.decisao.outputs.exit_code != '20' &&
+            steps.decisao.outputs.exit_code != '30'
+        run: |
+          echo "exit code inesperado: ${{ steps.decisao.outputs.exit_code }}"
+          exit 1
