@@ -26,7 +26,7 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2_contingency, ks_2samp, wasserstein_distance
+from scipy.stats import chi2, chi2_contingency, ks_2samp, wasserstein_distance
 
 __all__ = [
     "psi",
@@ -460,59 +460,59 @@ class DriftDetector:
         return viola_range(atual, self.ranges)
 
     # -- calibração -----------------------------------------------------------
-        def calibrar_piso(
-        self,
-        *,
-        modo: Literal["bloco", "aleatorio", "ambos"] = "ambos",
-        n_repeticoes: int = 40,
-        n_blocos: int = 2,
-        frac: float = 0.5,
-        quantil: float = 0.95,
-        seed: int = 0,
-    ) -> dict[str, float | str]:
-            """Calibra o limiar E diagnostica se a referência merece confiança.
+    def calibrar_piso(
+    self,
+    *,
+    modo: Literal["bloco", "aleatorio", "ambos"] = "ambos",
+    n_repeticoes: int = 40,
+    n_blocos: int = 2,
+    frac: float = 0.5,
+    quantil: float = 0.95,
+    seed: int = 0,
+) -> dict[str, float | str]:
+        """Calibra o limiar E diagnostica se a referência merece confiança.
 
-            Faz DUAS coisas diferentes, e a distinção entre elas é o ponto:
+        Faz DUAS coisas diferentes, e a distinção entre elas é o ponto:
 
-            1. SPLIT ALEATÓRIO (`modo="aleatorio"`)
-            Permuta a referência e divide ao meio, N vezes. Mede o piso de
-            ruído do instrumento sob trocabilidade.
+        1. SPLIT ALEATÓRIO (`modo="aleatorio"`)
+        Permuta a referência e divide ao meio, N vezes. Mede o piso de
+        ruído do instrumento sob trocabilidade.
 
-            ⚠️  Este é o teste A/A como todo mundo pratica — e ele é
-            PROVADAMENTE CEGO a contaminação da janela de referência. Se a sua
-            referência contém dois regimes, a permutação distribui os dois
-            igualmente entre as metades: as duas metades passam a ser amostras
-            da MESMA mistura, e mistura é permutacionalmente trocável. Medido:
-            o valor fica travado em ~1× o previsto de 0% a 50% de contaminação.
+        ⚠️  Este é o teste A/A como todo mundo pratica — e ele é
+        PROVADAMENTE CEGO a contaminação da janela de referência. Se a sua
+        referência contém dois regimes, a permutação distribui os dois
+        igualmente entre as metades: as duas metades passam a ser amostras
+        da MESMA mistura, e mistura é permutacionalmente trocável. Medido:
+        o valor fica travado em ~1× o previsto de 0% a 50% de contaminação.
 
-            Serve para: confirmar que o instrumento está sadio.
-            Não serve para: descobrir que o gabarito está podre.
+        Serve para: confirmar que o instrumento está sadio.
+        Não serve para: descobrir que o gabarito está podre.
 
-            2. SPLIT EM BLOCO (`modo="bloco"`)
-            Divide a referência em blocos CONSECUTIVOS, na ordem em que ela
-            está, e compara blocos adjacentes. Se a referência estiver ordenada
-            pelo eixo suspeito — tempo, lote, turno, versão de firmware,
-            tenant — este split detecta heterogeneidade interna.
+        2. SPLIT EM BLOCO (`modo="bloco"`)
+        Divide a referência em blocos CONSECUTIVOS, na ordem em que ela
+        está, e compara blocos adjacentes. Se a referência estiver ordenada
+        pelo eixo suspeito — tempo, lote, turno, versão de firmware,
+        tenant — este split detecta heterogeneidade interna.
 
-            Medido (contaminação por um 2º regime a +1σ, no fim da janela):
-                0%  → H ≈ 0.6      10% → H ≈ 2.8
-                5%  → H ≈ 0.8      20% → H ≈ 9.6      50% → H ≈ 55.8
-            Falso positivo sob H0 verdadeiro: 0.0% em 12 famílias de marginal.
+        Medido (contaminação por um 2º regime a +1σ, no fim da janela):
+            0%  → H ≈ 0.6      10% → H ≈ 2.8
+            5%  → H ≈ 0.8      20% → H ≈ 9.6      50% → H ≈ 55.8
+        Falso positivo sob H0 verdadeiro: 0.0% em 12 famílias de marginal.
 
-            O índice H
-            ----------
-                H = piso medido / piso analítico
+        O índice H
+        ----------
+            H = piso medido / piso analítico
 
-                H < 2   referência homogênea no eixo testado
-                2 ≤ H < 5   suspeita — investigue antes de confiar no limiar
-                H ≥ 5   CONTAMINADA: há mais de um regime dentro da referência.
-                        Nenhum limiar te salva disso. O problema não é o limiar,
-                        é o gabarito.
+            H < 2   referência homogênea no eixo testado
+            2 ≤ H < 5   suspeita — investigue antes de confiar no limiar
+            H ≥ 5   CONTAMINADA: há mais de um regime dentro da referência.
+                    Nenhum limiar te salva disso. O problema não é o limiar,
+                    é o gabarito.
 
-            ⚠️  ORDENE A REFERÊNCIA antes de chamar com `modo="bloco"`. Se a ordem
-            das linhas for arbitrária, o split em bloco não tem poder nenhum — ele
-            vira um split aleatório caro.
-            """
+        ⚠️  ORDENE A REFERÊNCIA antes de chamar com `modo="bloco"`. Se a ordem
+        das linhas for arbitrária, o split em bloco não tem poder nenhum — ele
+        vira um split aleatório caro.
+        """
         rng = np.random.default_rng(seed)
         n_total = len(self.referencia)
         sonda = self.com(psi_limiar=0.0, alpha=1.0, min_obs=20)
@@ -585,10 +585,10 @@ class DriftDetector:
         # =====================================================================
         n_meia = n_total // 2
         prev_aa = piso_analitico(n_meia, n_total - n_meia,
-                                 bins=self.bins, k_features=k_num, quantil=quantil)
+                                    bins=self.bins, k_features=k_num, quantil=quantil)
         tam_b = n_total // max(n_blocos, 2)
         prev_bl = piso_analitico(tam_b, tam_b,
-                                 bins=self.bins, k_features=k_num, quantil=quantil)
+                                    bins=self.bins, k_features=k_num, quantil=quantil)
         out["piso_analitico"] = round(prev_aa, 6)
 
         if np.isfinite(piso_aa) and prev_aa > 0:
@@ -599,7 +599,7 @@ class DriftDetector:
             H = piso_bloco / prev_bl
             out["H"] = round(H, 2)
             out["referencia"] = ("homogenea" if H < 2 else
-                                 "suspeita" if H < 5 else "CONTAMINADA")
+                                    "suspeita" if H < 5 else "CONTAMINADA")
 
         # =====================================================================
         #  4. o limiar sugerido

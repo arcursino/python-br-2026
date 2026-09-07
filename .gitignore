@@ -1,0 +1,18 @@
+# --- Python (Byte-compiled / Cache) ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Ambientes Virtuais ---
+.venv/
+venv/
+env/
+
+# --- Dados Locais e Saídas de Scripts (Tutorial) ---
+data/
+*.json
+*.parquet
+
+# --- IDEs (VS Code / macOS) ---
+.vscode/
+.DS_Store

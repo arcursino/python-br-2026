@@ -28,8 +28,8 @@ Mapa dos módulos
 
 Uso rápido
 ----------
->>> from driftkit.fixtures import gerar_fixture, janela
->>> from driftkit.detectors import DriftDetector
+>>> from src.driftkit.fixtures import gerar_fixture, janela
+>>> from src.driftkit.detectors import DriftDetector
 >>> df = gerar_fixture(seed=7)
 >>> det = DriftDetector.from_reference(
 ...     df.query("dia < 30"), num=["torque_medido"], cat=["aro"]

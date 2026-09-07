@@ -1,5 +1,5 @@
 # =============================================================================
-#  Makefile — pybr2026-drift
+#  Makefile — python-br-2026
 #
 #  Para quem trouxe o próprio notebook. Quem estiver no laboratório usa Colab
 #  e não precisa de nada disto.
@@ -17,7 +17,7 @@ RUN := $(if $(UV),uv run,python -m)
 
 ajuda:  ## mostra esta ajuda
 	@echo ""
-	@echo "  pybr2026-drift — Rumo ao Desconhecido: Tratando Drift em ML"
+	@echo "  python-br-2026 — Rumo ao Desconhecido: Tratando Drift em ML"
 	@echo ""
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'

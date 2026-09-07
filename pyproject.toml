@@ -1,5 +1,5 @@
 # =============================================================================
-#  pyproject.toml — pybr2026-drift
+#  pyproject.toml — arcursino/python-br-2026
 #  Backend: hatchling (já disponível no Colab via pip; não precisa instalar nada)
 # =============================================================================
 [build-system]
@@ -48,7 +48,7 @@ dev = [
 driftkit = "driftkit.cli:app"
 
 [project.urls]
-Repositorio = "https://github.com/SEU_USUARIO/pybr2026-drift"
+Repositorio = "https://github.com/arcursino/python-br-2026"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/driftkit"]

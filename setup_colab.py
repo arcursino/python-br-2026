@@ -183,10 +183,10 @@ for nome, para, _mb in ARQUIVOS_DADOS:
 
 print()
 try:
-    import driftkit
+    import src.driftkit as driftkit  # noqa: F401
 
     importlib.reload(driftkit)
-    from driftkit.detectors import psi  # noqa: F401
+    from src.driftkit.detectors import psi  # noqa: F401
 
     print(f"  {'import driftkit':<36}{'✅':<3}v{driftkit.__version__}")
 except Exception as e:  # noqa: BLE001
