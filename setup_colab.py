@@ -3,7 +3,7 @@ setup_colab.py — bootstrap idempotente para Google Colab.
 
 USO NO NOTEBOOK (célula 0, duas linhas):
 
-    !curl -sSL https://raw.githubusercontent.com/SEU_USUARIO/pybr2026-drift/main/setup_colab.py -o /tmp/s.py
+    !curl -sSL https://raw.githubusercontent.com/arcursino/python-br-2026/main/setup_colab.py -o /tmp/s.py
     %run /tmp/s.py
 
 Ou, se o repositório já foi clonado:
@@ -11,7 +11,7 @@ Ou, se o repositório já foi clonado:
     %run setup_colab.py
 
 O que faz, em ordem:
-  1. clona (ou atualiza) o repositório em /content/pybr2026-drift
+  1. clona (ou atualiza) o repositório em /content/python-br-2026
   2. instala o pacote em modo editável  →  `import driftkit` e CLI `driftkit`
   3. baixa os dados derivados do GitHub Releases (~180 MB, não os 14 GB da Kaggle)
   4. imprime um diagnóstico linha a linha
