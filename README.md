@@ -2,8 +2,8 @@
 
 **Tutorial · Python Brasil 2026 · 3h30**
 
-[![Abrir no Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SEU_USUARIO/pybr2026-drift/blob/main/notebooks/00_ambiente.ipynb)
-[![CI](https://github.com/SEU_USUARIO/pybr2026-drift/actions/workflows/ci.yml/badge.svg)](https://github.com/SEU_USUARIO/pybr2026-drift/actions)
+[![Abrir no Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/arcursino/python-br-2026/blob/main/notebooks/00_ambiente.ipynb)
+[![CI](https://github.com/arcursino/python-br-2026/actions/workflows/ci.yml/badge.svg)](https://github.com/arcursino/python-br-2026/actions)
 
 > Um detector de drift é um **instrumento de medição**. E ninguém valida um
 > instrumento contra uma amostra de valor desconhecido — você calibra a balança
@@ -29,8 +29,8 @@
 <summary><b>Prefere rodar local?</b> (opcional, para quem traz o próprio notebook)</summary>
 
 ```bash
-git clone https://github.com/SEU_USUARIO/pybr2026-drift.git
-cd pybr2026-drift
+git clone https://github.com/arcursino/python-br-2026.git
+cd python-br-2026
 make setup      # uv sync, ~30s
 make test       # se ficar verde, você está pronto
 make demo       # o argumento do tutorial inteiro em 2 minutos
