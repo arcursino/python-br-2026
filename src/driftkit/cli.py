@@ -22,6 +22,7 @@ diferença entre um sistema que retreina e um sistema que ENTENDE.
 Uso
 ---
     driftkit calibrar --seed 7                  # gera o contrato v1 (Parte I)
+    driftkit calibrar --modo bloco --eixo dia   # diagnostica a REFERÊNCIA
     driftkit check   data/janela.parquet        # mede. Não decide.
     driftkit decide  data/janela.parquet        # decide. Exit code é a resposta.
     driftkit retrain data/janela.parquet        # retreina — se autorizado.
@@ -79,17 +80,47 @@ def versao() -> None:
 @app.command()
 def calibrar(
     seed: int = typer.Option(7, help="Seed da fixture sintética."),
-    saida: Path = typer.Option(Path("data/detector_config.json"), help="Onde gravar o contrato."),
+    saida: Path = typer.Option(
+        Path("data/detector_config_referencia_v1.json"),
+        help="Onde gravar o contrato. O nome default é o mesmo do asset do Release.",
+    ),
     repeticoes: int = typer.Option(40, help="Repetições do teste A/A."),
+    modo: str = typer.Option(
+        "ambos",
+        "--modo",
+        help="aleatorio | bloco | ambos. 'bloco' é o que enxerga referência contaminada.",
+        case_sensitive=False,
+    ),
+    n_blocos: int = typer.Option(4, "--n-blocos", help="Número de blocos no split em bloco."),
+    eixo: str = typer.Option(
+        "dia",
+        "--eixo",
+        help="Coluna que ordena a referência antes do split em bloco (tempo, lote, turno).",
+    ),
 ) -> None:
-    """Calibra o detector contra a fixture sintética e grava o contrato v1.
+    """Calibra o detector contra a fixture sintética E diagnostica a referência.
 
     É a Parte I inteira, executável sem notebook — o que torna a calibração
     reproduzível em CI. Nenhum limiar deste projeto foi escolhido a olho.
+
+    \b
+    Dois modos, duas perguntas diferentes:
+      --modo aleatorio  → qual é o ruído do INSTRUMENTO?
+      --modo bloco      → a minha REFERÊNCIA merece confiança?
+
+    O segundo é o que importa mais, e é o que quase ninguém faz. O split
+    aleatório é provadamente CEGO a uma referência que contém mais de um
+    regime: a permutação distribui os regimes igualmente entre as metades,
+    e mistura embaralhada é permutacionalmente trocável. Dá verde sempre.
     """
-    from .detectors import DriftDetector
+    from .detectors import DriftDetector, n_equivalente, piso_analitico
     from .fixtures import CAT, NUM, RANGES, gerar_fixture, validar_fixture
     from .state import Contrato, salvar_contrato
+
+    modo = modo.lower()
+    if modo not in {"aleatorio", "bloco", "ambos"}:
+        _eco(f"--modo inválido: {modo!r}. Use aleatorio | bloco | ambos.", ERRO)
+        raise typer.Exit(2)
 
     _eco("→ gerando fixture...", negrito=True)
     df = gerar_fixture(seed=seed)
@@ -103,18 +134,59 @@ def calibrar(
         raise typer.Exit(1)
 
     ref = df.query("dia < 30")
+    if modo in {"bloco", "ambos"}:
+        if eixo not in ref.columns:
+            _eco(
+                f"\n⚠️  coluna --eixo {eixo!r} não existe na referência. "
+                "Sem ordenação, o split em bloco vira um split aleatório caro.",
+                AVISO,
+            )
+        else:
+            ref = ref.sort_values(eixo)
+
     det = DriftDetector.from_reference(ref, num=list(NUM), cat=list(CAT), ranges=RANGES)
 
-    _eco(f"\n→ teste A/A ({repeticoes} repetições) — medindo o piso de ruído...")
-    piso = det.calibrar_piso(n_repeticoes=repeticoes, seed=seed)
+    _eco(f"\n→ calibrando o piso de ruído (modo={modo}, {repeticoes} repetições)...")
+    piso = det.calibrar_piso(
+        n_repeticoes=repeticoes, seed=seed, modo=modo, n_blocos=n_blocos
+    )
     for k, v in piso.items():
-        _eco(f"   {k:<24} {v}")
+        _eco(f"   {k:<26} {v}")
 
+    # ---- o piso tem forma fechada: confira o medido contra o previsto -------
+    n_meia = len(ref) // 2
+    previsto = piso_analitico(n_meia, n_meia, bins=10)
     _eco(
-        "\n   O 'PSI > 0.1' que você leu no blog não é lei da natureza.\n"
+        f"\n   piso ANALÍTICO previsto      {previsto:.6f}"
+        f"   [χ²₀.₉₅(B-1)·(1/n+1/m)]"
+    )
+    _eco(
+        f"   o limiar 0.1 que você herdou é o piso de uma janela de "
+        f"~{n_equivalente(0.10):.0f} observações."
+    )
+    _eco(
+        f"\n   O 'PSI > 0.1' que você leu no blog não é lei da natureza.\n"
         f"   O piso DESTE detector, nesta referência, é {piso['piso_aa']:.5f}.",
         AVISO,
     )
+
+    # ---- o diagnóstico que o split aleatório não consegue dar ---------------
+    h = piso.get("H")
+    if h is not None:
+        if h < 2:
+            _eco(f"\n   H = {h:.2f} → referência HOMOGÊNEA no eixo {eixo!r}. "
+                 "Limiar confiável.", OK)
+        elif h < 5:
+            _eco(f"\n   H = {h:.2f} → SUSPEITA. Investigue antes de confiar no limiar.",
+                 AVISO)
+        else:
+            _eco(
+                f"\n   H = {h:.2f} → referência CONTAMINADA: ela contém mais de um "
+                f"regime.\n   Bloco mais divergente: {piso.get('bloco_mais_divergente', '?')}\n"
+                "   Nenhum limiar te salva disso. Encurte ou segmente a referência\n"
+                "   ANTES de calibrar qualquer coisa.",
+                ERRO,
+            )
 
     contrato = Contrato(
         versao="v1-sintetico",
@@ -122,6 +194,9 @@ def calibrar(
         features={"num": list(NUM), "cat": list(CAT)},
         limiares={
             "psi_piso_aa": piso["piso_aa"],
+            "psi_piso_analitico": previsto,
+            "psi_piso_bloco": piso.get("piso_bloco"),
+            "H": h,
             "psi_alarme": piso["psi_alarme_sugerido"],
             "alpha": 0.05,
             "min_obs": 200,
@@ -146,11 +221,13 @@ def calibrar(
             "amostras_por_janela": int(len(df) / df["dia"].nunique() * 3),
             "prevalencia": round(float(ref["falha"].mean()), 4),
             "seed": seed,
+            "calibracao": {"modo": modo, "n_blocos": n_blocos, "eixo": eixo},
         },
         suite={"pass": len(checks), "total": len(checks)},
     )
     salvar_contrato(contrato, saida)
     _eco("\n" + contrato.resumo())
+    _eco(f"\n✅ contrato gravado em {saida}", OK)
 
 
 # =============================================================================
