@@ -180,14 +180,30 @@ class PoliticaRetreino:
         # performance cai, é mais provável que o mundo tenha mudado de fato.
         if auc_global is not None and auc_segmento is not None:
             gap = auc_global - auc_segmento
+            # Critério de RAZÃO, não de diferença. Mede quanto do poder
+            # discriminativo acima do acaso sobrou no segmento em relação ao
+            # que sobrou na janela agregada.
+            #
+            # Por que não `gap > 0.15`: o TC-3 arrasta a AUC global para baixo
+            # junto com a do segmento, o que COMPRIME o gap exatamente quando o
+            # problema é mais grave. Um limiar absoluto sobre uma diferença de
+            # duas métricas que caem juntas é frágil por construção — e precisa
+            # ser recalibrado a cada mudança de magnitude da fixture.
+            lift_g = max(auc_global - 0.5, 1e-6)
+            lift_s = max(auc_segmento - 0.5, 0.0)
+            razao_lift = lift_s / lift_g
+            localizada = razao_lift < 0.35 and auc_segmento < 0.55
+
             px_calmo = relatorio.n_drift == 0 or not np.isfinite(relatorio.efeito_max) \
                 or relatorio.efeito_max < self.fator_piso * self.piso_aa
-            if gap > 0.15 and px_calmo:
+            if localizada and px_calmo:
                 return Causa.HARDWARE, (
-                    f"degradação LOCALIZADA (Δ AUC segmento = {gap:.3f}) "
+                    f"degradação LOCALIZADA (AUC segmento {auc_segmento:.3f} vs "
+                    f"global {auc_global:.3f}; lift residual {razao_lift:.0%}) "
                     f"com P(X) calmo (efeito máx {relatorio.efeito_max:.4f}) — "
                     "assinatura de instrumentação, não de modelo"
                 )
+
 
         # ---- assinatura NEGÓCIO: P(X) grita e performance intacta ----------
         if relatorio.n_drift > 0 and auc_global is not None and auc_segmento is not None:
