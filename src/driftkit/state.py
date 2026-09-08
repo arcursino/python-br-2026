@@ -220,6 +220,8 @@ def comparar_regimes(
     v1, v2 : dict
         Saídas de `DriftDetector.calibrar_piso()` nos dois regimes.
     """
+    from .detectors import n_equivalente   # ← import local, evita ciclo
+    
     def _extrai(v: dict) -> dict:
         return {
             "n": v.get("n_referencia"),
