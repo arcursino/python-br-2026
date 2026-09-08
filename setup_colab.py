@@ -11,11 +11,12 @@ Ou, se o repositório já foi clonado:
     %run setup_colab.py
 
 O que faz, em ordem:
-  1. clona (ou atualiza) o repositório em /content/pybr2026-drift
-  2. instala o pacote EM CAMADAS (núcleo obrigatório → extras opcionais)
-  3. baixa os dados derivados do GitHub Releases (~180 MB, não os 14 GB da Kaggle)
-  4. imprime um diagnóstico linha a linha
-  5. liga %autoreload para que edições em src/ tenham efeito sem reiniciar
+  1. clona (ou atualiza) o repositório em /content/python-br-2026
+  2. TRAVA a stack binária que o Colab já trouxe (numpy/scipy/pandas/sklearn)
+  3. instala o pacote EM CAMADAS (núcleo obrigatório → extras opcionais)
+  4. baixa os dados derivados do GitHub Releases (~180 MB, não os 14 GB da Kaggle)
+  5. imprime um diagnóstico linha a linha
+  6. liga %autoreload para que edições em src/ tenham efeito sem reiniciar
 
 PRINCÍPIO DE PROJETO
 --------------------
@@ -23,6 +24,23 @@ Só existem DUAS razões para abortar: o clone falhou, ou o núcleo não instalo
 Qualquer outra falha é registrada e o setup continua — porque nenhum extra é
 pré-requisito para os notebooks, e um `pip` quebrado num pacote opcional não
 pode custar 10 minutos de sala com 100 pessoas.
+
+POR QUE A TRAVA DE ABI (passo 2)
+--------------------------------
+O Colab embarca scipy, pandas e scikit-learn como wheels COMPILADAS contra
+o numpy que vem na mesma imagem. Se o pip resolver o nosso `numpy>=1.26`
+para uma versão diferente — para cima OU para baixo — a ABI quebra, e o
+sintoma muda a cada execução:
+
+    AttributeError: ... has no attribute '_blas_supports_fpe'
+    ImportError: cannot import name '_slice' from 'numpy._core.umath'
+    AttributeError: 'numpy.ufunc' object has no attribute '__module__'
+
+São todos o MESMO problema. A solução não é escolher a versão "certa" do
+numpy: é não deixar o pip encostar nele. Geramos um arquivo de constraints
+a partir do que JÁ está instalado e o aplicamos em todas as chamadas de pip,
+inclusive via PIP_CONSTRAINT (que alcança também os subprocessos de build
+isolation, onde um `-c` na linha de comando não chega).
 
 É seguro rodar quantas vezes quiser. Se o runtime do Colab cair, rode de novo:
 volta ao estado inicial em ~90 segundos.
@@ -50,6 +68,11 @@ BASE_RELEASE = f"https://github.com/{GH_USER}/{GH_REPO}/releases/download/{TAG_D
 
 RAIZ = Path("/content") / GH_REPO if Path("/content").exists() else Path.cwd()
 DATA = RAIZ / "data"
+
+# Pacotes cuja versão NÃO pode ser trocada: são wheels binárias que o Colab
+# já trouxe compiladas umas contra as outras.
+STACK_BINARIA = ("numpy", "scipy", "pandas", "scikit-learn", "pyarrow")
+CONSTRAINTS = Path("/tmp/pybr2026-constraints.txt")
 
 # Arquivos de dados: (nome, obrigatório_para, tamanho_aprox_mb)
 ARQUIVOS_DADOS = [
@@ -106,12 +129,25 @@ def _explicar_erro_pip(saida: list[str]) -> None:
         print(f"  Python deste runtime: {sys.version.split()[0]}")
         print("\n  Isto é típico de sdist com pins antigos em Python 3.12+.")
         print("  Desbloqueio (roda agora, sem os extras frágeis):")
-        print(f'      !pip install -q -e "{RAIZ}[dev,mercado]"')
+        print(f'      !pip install -q -c {CONSTRAINTS} -e "{RAIZ}[dev,mercado]"')
     elif "no space left" in texto:
         print("\n  DIAGNÓSTICO: disco cheio. Menu → Runtime → Disconnect and delete runtime.")
     elif "could not find a version" in texto:
         print("\n  DIAGNÓSTICO: nenhuma versão compatível com este Python.")
         print(f"  Python deste runtime: {sys.version.split()[0]}")
+    elif "conflict" in texto and "constraint" in texto:
+        print("\n  DIAGNÓSTICO: um extra exige versão de numpy/scipy/pandas diferente")
+        print("  da que o Colab embarca. Ele NÃO será instalado — e está certo assim:")
+        print("  trocar a stack binária quebra o `import driftkit`.")
+
+
+def pip_install(alvo: str, *, critico: bool = True) -> subprocess.CompletedProcess:
+    """pip install com a trava de ABI sempre aplicada.
+
+    Nunca chame `pip install` direto neste arquivo. Toda instalação passa por
+    aqui, senão a trava vira decoração.
+    """
+    return sh(f'pip install -q -c "{CONSTRAINTS}" {alvo}', critico=critico)
 
 
 def baixar(url: str, destino: Path, *, mb: float = 0) -> bool:
@@ -143,20 +179,46 @@ print(f"\n  Python {sys.version.split()[0]}  ·  Colab: {'sim' if IN_COLAB else 
 
 if IN_COLAB:
     if (RAIZ / ".git").exists():
-        print("\n[1/4] repositório já presente — atualizando...")
+        print("\n[1/5] repositório já presente — atualizando...")
         sh(f"git -C {RAIZ} pull -q --ff-only", critico=False)
     else:
-        print("\n[1/4] clonando repositório...")
+        print("\n[1/5] clonando repositório...")
         if RAIZ.exists():
             shutil.rmtree(RAIZ)
         sh(f"git clone --depth 1 -q {REPO_URL} {RAIZ}")   # CRÍTICO
     os.chdir(RAIZ)
 else:
-    print("\n[1/4] fora do Colab — usando diretório atual como raiz")
+    print("\n[1/5] fora do Colab — usando diretório atual como raiz")
     os.chdir(RAIZ)
 
 # =============================================================================
-#  2. instalação EM CAMADAS
+#  2. TRAVA DE ABI  (antes de qualquer pip install)
+# =============================================================================
+print("[2/5] travando a stack binária já instalada...")
+
+_travados: list[str] = []
+for _pkg in STACK_BINARIA:
+    try:
+        _travados.append(f"{_pkg}=={md.version(_pkg)}")
+    except md.PackageNotFoundError:
+        # não está instalado: deixe o pip resolver livremente
+        pass
+
+CONSTRAINTS.write_text("\n".join(_travados) + "\n")
+
+# PIP_CONSTRAINT alcança também os subprocessos de build isolation, onde um
+# `-c` na linha de comando não chega. Cinto e suspensório.
+os.environ["PIP_CONSTRAINT"] = str(CONSTRAINTS)
+
+if _travados:
+    for _t in _travados:
+        print(f"      🔒 {_t}")
+else:
+    print("      (nada a travar — ambiente limpo)")
+    _avisos.append("stack binária não estava pré-instalada; ABI não foi travada")
+
+# =============================================================================
+#  3. instalação EM CAMADAS
 # =============================================================================
 # Camada 1 (crítica): núcleo + dev. Sem isto, nada funciona.
 # Camada 2 (opcional): river — wheels puras, raramente falha.
@@ -165,10 +227,10 @@ else:
 # alibi-detect NÃO é instalado aqui, de propósito: em Python 3.12+ ele quebra
 # a geração de metadata e derrubava o setup inteiro. Está em
 # `[mercado-alibi]` para quem quiser tentar num venv com Python 3.11.
-print("[2/4] instalando em camadas...")
+print("[3/5] instalando em camadas (com a trava aplicada)...")
 
 print("      camada 1/3  núcleo + dev (crítica)...", end=" ", flush=True)
-sh('pip install -q -e ".[dev]"')   # CRÍTICO — só isto aborta
+pip_install('-e ".[dev]"')   # CRÍTICO — só isto aborta
 print("ok ✅")
 
 for nome_camada, extra, rotulo in [
@@ -177,7 +239,8 @@ for nome_camada, extra, rotulo in [
 ]:
     print(f"      camada {nome_camada}  {rotulo} (opcional)...", end=" ", flush=True)
     r = subprocess.run(
-        f'pip install -q -e ".[{extra}]"', shell=True, text=True, capture_output=True
+        f'pip install -q -c "{CONSTRAINTS}" -e ".[{extra}]"',
+        shell=True, text=True, capture_output=True,
     )
     if r.returncode:
         print("falhou ⚠️  (segue sem ele)")
@@ -185,15 +248,32 @@ for nome_camada, extra, rotulo in [
     else:
         print("ok ✅")
 
+# ---- a trava funcionou? conferir é barato; descobrir no import é caro ------
+_mudou = []
+for _spec in _travados:
+    _nome, _versao = _spec.split("==")
+    try:
+        if md.version(_nome) != _versao:
+            _mudou.append(f"{_nome}: {_versao} → {md.version(_nome)}")
+    except md.PackageNotFoundError:
+        _mudou.append(f"{_nome}: removido!")
+if _mudou:
+    print("\n      ⚠️  a stack binária MUDOU apesar da trava:")
+    for _m in _mudou:
+        print(f"            {_m}")
+    print("      O `import driftkit` provavelmente vai falhar por ABI.")
+    print("      Desbloqueio: Runtime → Desconectar e excluir → rodar de novo.")
+    _avisos.append("stack binária alterada apesar da trava — ver acima")
+
 # cinto e suspensório: garante o src no path mesmo se o editable falhar
 src = str(RAIZ / "src")
 if src not in sys.path:
     sys.path.insert(0, src)
 
 # =============================================================================
-#  3. dados
+#  4. dados
 # =============================================================================
-print("[3/4] verificando dados derivados...")
+print("[4/5] verificando dados derivados...")
 DATA.mkdir(parents=True, exist_ok=True)
 
 # Estratégia de banda: só o essencial agora. O Bosch (grande) fica para o
@@ -210,9 +290,9 @@ for nome, _para, mb in ARQUIVOS_DADOS:
                 _avisos.append(f"{nome} não baixou — o contrato v1 usará o default embutido")
 
 # =============================================================================
-#  4. diagnóstico
+#  5. diagnóstico
 # =============================================================================
-print("[4/4] diagnóstico\n")
+print("[5/5] diagnóstico\n")
 
 # obrigatórios: ausência é FALHA
 OBRIGATORIOS = {
@@ -249,7 +329,8 @@ for grupo, obrigatorio in ((OBRIGATORIOS, True), (OPCIONAIS, False)):
                 _falhas.append(f"{pkg} ausente")
             else:
                 _avisos.append(f"{pkg} ausente (opcional)")
-        print(f"  {pkg:<26}{icone:<3}{v}")
+        trava = " 🔒" if pkg in STACK_BINARIA else ""
+        print(f"  {pkg:<26}{icone:<3}{v}{trava}")
 
 print()
 print(f"  {'dado':<36}{'':<3}{'tamanho'}")
@@ -273,6 +354,16 @@ try:
 except Exception as e:  # noqa: BLE001
     print(f"  {'import driftkit':<36}{'❌':<3}{type(e).__name__}: {e}")
     _falhas.append("import driftkit")
+    # ABI quebrada tem cara própria: dê o desbloqueio junto com o erro.
+    _texto_erro = f"{type(e).__name__}: {e}".lower()
+    if any(s in _texto_erro for s in ("numpy", "ufunc", "umath", "abi", "_core")):
+        print("\n      DIAGNÓSTICO: incompatibilidade de ABI do numpy.")
+        print("      Isto é drift de ambiente — o mesmo fenômeno do tutorial,")
+        print("      só que no seu interpretador. Desbloqueio:")
+        print("        1. Runtime → Desconectar e EXCLUIR o ambiente de execução")
+        print("        2. rodar esta célula de novo (runtime limpo, trava ativa)")
+        print("      Reinstalar sem reiniciar NÃO resolve: o módulo quebrado")
+        print("      já está carregado em memória.")
 
 r = sh("driftkit --help", critico=False, linhas_erro=5)
 if r.returncode == 0:
@@ -317,6 +408,7 @@ else:
     print("  ✅ AMBIENTE PRONTO. Levante o cartão 🟢.")
 print(f"\n  RAIZ = {RAIZ}")
 print(f"  DATA = {DATA}")
+print(f"  TRAVA = {CONSTRAINTS}")
 print("=" * 62)
 
 # expostos para as células seguintes
