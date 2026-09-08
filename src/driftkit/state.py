@@ -24,6 +24,7 @@ desse erro.
 from __future__ import annotations
 
 import json
+import numpy as np
 import platform
 import sys
 from dataclasses import asdict, dataclass, field
