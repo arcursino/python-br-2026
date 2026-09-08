@@ -63,6 +63,24 @@ class Causa(str):
 
 CAUSAS_QUE_BLOQUEIAM = frozenset({Causa.HARDWARE, Causa.PIPELINE})
 
+# Quantos múltiplos do limiar calibrado ainda contam como "P(X) calmo".
+#
+# Não é um número escolhido no olho: é a região ENTRE o limiar de detecção e a
+# magnitude de um covariate drift genuíno. Na fixture, com psi_limiar≈0.0102:
+#
+#     TC-3 (concept, exige BLOQUEIO) : efeito máx 0.0178   ≈  1.7× o limiar
+#     TC-2 (covariate, exige registro): efeito máx 1.9136  ≈ 187× o limiar
+#
+# Duas ordens de grandeza separam os dois casos. Qualquer teto entre ~3× e ~50×
+# os distingue; 10× fica no meio do vão, em escala logarítmica.
+FATOR_PX_CALMO = 10.0
+
+# Quantas features podem estar em drift e a janela ainda ser considerada calma.
+# O TC-3 vaza UMA feature (`torque_medido`): a compensação do operador cancela
+# 87.5% do offset, não 100%. Exigir n_drift == 0 é exigir que o resíduo físico
+# não exista.
+MAX_FEATURES_EM_DRIFT_CALMO = 1
+
 
 @dataclass(frozen=True, slots=True)
 class Decisao:
@@ -174,36 +192,61 @@ class PoliticaRetreino:
                 if ini <= dia <= fim:
                     return Causa.NEGOCIO, f"janela dentro do contexto planejado `{nome}`"
 
-        # ---- assinatura HARDWARE: localizada + performance cai sem P(X) ----
+        # ---- assinatura HARDWARE: localizada + P(X) calmo -------------------
         # A marca do sensor descalibrado: a degradação é de UM segmento e o
         # monitor de distribuição está calmo (ou quase). Se P(X) grita E a
         # performance cai, é mais provável que o mundo tenha mudado de fato.
         if auc_global is not None and auc_segmento is not None:
-            gap = auc_global - auc_segmento
+            # (a) A degradação é LOCALIZADA?
+            #
             # Critério de RAZÃO, não de diferença. Mede quanto do poder
             # discriminativo acima do acaso sobrou no segmento em relação ao
             # que sobrou na janela agregada.
             #
-            # Por que não `gap > 0.15`: o TC-3 arrasta a AUC global para baixo
-            # junto com a do segmento, o que COMPRIME o gap exatamente quando o
-            # problema é mais grave. Um limiar absoluto sobre uma diferença de
-            # duas métricas que caem juntas é frágil por construção — e precisa
-            # ser recalibrado a cada mudança de magnitude da fixture.
+            # Por que não `auc_global - auc_segmento > 0.15`: o TC-3 arrasta a
+            # AUC global para baixo junto com a do segmento, o que COMPRIME a
+            # diferença exatamente quando o problema é mais grave. Um limiar
+            # absoluto sobre a diferença de duas métricas que caem juntas é
+            # frágil por construção — precisa ser recalibrado a cada mudança de
+            # magnitude da fixture, e falha silenciosamente quando não é.
             lift_g = max(auc_global - 0.5, 1e-6)
             lift_s = max(auc_segmento - 0.5, 0.0)
             razao_lift = lift_s / lift_g
             localizada = razao_lift < 0.35 and auc_segmento < 0.55
 
-            px_calmo = relatorio.n_drift == 0 or not np.isfinite(relatorio.efeito_max) \
-                or relatorio.efeito_max < self.fator_piso * self.piso_aa
+            # (b) P(X) está calmo?
+            #
+            # "Calmo" é RELATIVO, e essa é a correção mais importante deste
+            # módulo. Concept drift NÃO é obrigatoriamente invisível em P(X):
+            # no TC-3 o resíduo não compensado pelo operador desloca o
+            # `torque_medido` em -0.45 Nm, o que dá efeito 0.0178 com
+            # p ≈ 8e-07. É pequeno, é real, e é ESTATISTICAMENTE INEGÁVEL.
+            #
+            # Exigir silêncio ABSOLUTO (n_drift == 0) torna a assinatura refém
+            # do tamanho da amostra: com n suficiente, todo resíduo físico vira
+            # significativo, e a assinatura de hardware deixa de existir
+            # justamente nas instalações mais bem instrumentadas.
+            #
+            # O que separa TC-3 de TC-2 não é presença vs. ausência de sinal em
+            # P(X) — é a ORDEM DE GRANDEZA do sinal (0.018 vs 1.91, ~107×).
+            calmo_em_magnitude = (
+                not np.isfinite(relatorio.efeito_max)
+                or relatorio.efeito_max < FATOR_PX_CALMO * self.detector.psi_limiar
+            )
+            px_calmo = (
+                relatorio.n_drift <= MAX_FEATURES_EM_DRIFT_CALMO
+                and calmo_em_magnitude
+            )
+
             if localizada and px_calmo:
                 return Causa.HARDWARE, (
                     f"degradação LOCALIZADA (AUC segmento {auc_segmento:.3f} vs "
                     f"global {auc_global:.3f}; lift residual {razao_lift:.0%}) "
-                    f"com P(X) calmo (efeito máx {relatorio.efeito_max:.4f}) — "
+                    f"com P(X) calmo ({relatorio.n_drift} feature(s), efeito máx "
+                    f"{relatorio.efeito_max:.4f} = "
+                    f"{relatorio.efeito_max / self.detector.psi_limiar:.1f}× o limiar) — "
                     "assinatura de instrumentação, não de modelo"
                 )
-
 
         # ---- assinatura NEGÓCIO: P(X) grita e performance intacta ----------
         if relatorio.n_drift > 0 and auc_global is not None and auc_segmento is not None:
