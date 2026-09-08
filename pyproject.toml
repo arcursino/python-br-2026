@@ -19,7 +19,7 @@ keywords = ["drift", "mlops", "monitoring", "manufacturing"]
 # --- Faixas largas de propósito: o Colab troca de versão sem avisar. ---------
 # Fixar "==" aqui é a receita para o tutorial quebrar na véspera do evento.
 dependencies = [
-    "numpy>=1.26,<2.3",
+    "numpy>=1.26",
     "pandas>=2.1",
     "scipy>=1.11",
     "scikit-learn>=1.3",
