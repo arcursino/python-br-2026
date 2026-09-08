@@ -13,7 +13,7 @@ description = "Detecção de data e concept drift com calibração por dataset s
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Ariana Cursino", email = "arcursino@gmail.conceptom" }]
+authors = [{ name = "Ariana Cursino", email = "arcursino@gmail.com" }]
 keywords = ["drift", "mlops", "monitoring", "manufacturing"]
 
 # --- Faixas largas de propósito: o Colab troca de versão sem avisar. ---------
