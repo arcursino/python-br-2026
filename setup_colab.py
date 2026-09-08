@@ -3,7 +3,7 @@ setup_colab.py — bootstrap idempotente para Google Colab.
 
 USO NO NOTEBOOK (célula 0, duas linhas):
 
-    !curl -sSL https://raw.githubusercontent.com/arcursino/python-br-2026/main/setup_colab.py -o /tmp/s.py
+    !curl -sSL https://raw.githubusercontent.com/SEU_USUARIO/pybr2026-drift/main/setup_colab.py -o /tmp/s.py
     %run /tmp/s.py
 
 Ou, se o repositório já foi clonado:
@@ -11,11 +11,18 @@ Ou, se o repositório já foi clonado:
     %run setup_colab.py
 
 O que faz, em ordem:
-  1. clona (ou atualiza) o repositório em /content/python-br-2026
-  2. instala o pacote em modo editável  →  `import driftkit` e CLI `driftkit`
+  1. clona (ou atualiza) o repositório em /content/pybr2026-drift
+  2. instala o pacote EM CAMADAS (núcleo obrigatório → extras opcionais)
   3. baixa os dados derivados do GitHub Releases (~180 MB, não os 14 GB da Kaggle)
   4. imprime um diagnóstico linha a linha
   5. liga %autoreload para que edições em src/ tenham efeito sem reiniciar
+
+PRINCÍPIO DE PROJETO
+--------------------
+Só existem DUAS razões para abortar: o clone falhou, ou o núcleo não instalou.
+Qualquer outra falha é registrada e o setup continua — porque nenhum extra é
+pré-requisito para os notebooks, e um `pip` quebrado num pacote opcional não
+pode custar 10 minutos de sala com 100 pessoas.
 
 É seguro rodar quantas vezes quiser. Se o runtime do Colab cair, rode de novo:
 volta ao estado inicial em ~90 segundos.
@@ -34,8 +41,8 @@ from pathlib import Path
 # =============================================================================
 #  CONFIGURAÇÃO — ajuste estas três linhas para o seu repositório
 # =============================================================================
-GH_USER = "arcursino"
-GH_REPO = "python-br-2026"
+GH_USER = "SEU_USUARIO"
+GH_REPO = "pybr2026-drift"
 TAG_DADOS = "dados-v1"  # tag do Release que contém os .parquet
 
 REPO_URL = f"https://github.com/{GH_USER}/{GH_REPO}.git"
@@ -53,30 +60,69 @@ ARQUIVOS_DADOS = [
 
 IN_COLAB = "google.colab" in sys.modules
 
+_falhas: list[str] = []   # aborta o avanço
+_avisos: list[str] = []   # degrada, mas segue
+
 
 # =============================================================================
 #  utilitários
 # =============================================================================
-def sh(cmd: str, *, critico: bool = True) -> subprocess.CompletedProcess:
-    """Roda um comando de shell mostrando saída só em caso de erro."""
+def sh(cmd: str, *, critico: bool = True, linhas_erro: int = 40) -> subprocess.CompletedProcess:
+    """Roda um comando de shell mostrando saída só em caso de erro.
+
+    Em falha, imprime as ÚLTIMAS `linhas_erro` linhas de stdout+stderr
+    combinados — que é onde o pip põe o nome do pacote culpado. A versão
+    anterior deste arquivo cortava por bytes e separava os streams, e o
+    resultado era um erro mudo: duas barras de progresso e nada mais.
+    """
     r = subprocess.run(cmd, shell=True, text=True, capture_output=True)
-    if r.returncode and critico:
-        print(f"\n❌ comando falhou: {cmd}\n")
-        print(r.stdout[-3000:])
-        print(r.stderr[-3000:])
-        raise SystemExit(
-            "\nSETUP INTERROMPIDO. Levante o cartão vermelho 🔴 e chame o monitor.\n"
-            "Não avance para as próximas células."
-        )
+    if r.returncode:
+        saida = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
+        print(f"\n{'❌' if critico else '⚠️ '} comando falhou: {cmd}")
+        print("─" * 62)
+        for linha in saida[-linhas_erro:]:
+            print("  " + linha)
+        print("─" * 62)
+        _explicar_erro_pip(saida)
+        if critico:
+            raise SystemExit(
+                "\nSETUP INTERROMPIDO. Levante o cartão vermelho 🔴 e chame o monitor.\n"
+                "Não avance para as próximas células."
+            )
     return r
 
 
+def _explicar_erro_pip(saida: list[str]) -> None:
+    """Traduz os erros de pip que a gente já viu, com a saída pronta."""
+    texto = "\n".join(saida).lower()
+    if "metadata-generation-failed" in texto or "preparing metadata" in texto:
+        culpado = next(
+            (p for p in ("alibi-detect", "alibi_detect", "evidently", "river", "tensorflow")
+             if p in texto), None
+        )
+        print("\n  DIAGNÓSTICO: algum pacote não conseguiu gerar metadata.")
+        if culpado:
+            print(f"  Culpado provável: {culpado}")
+        print(f"  Python deste runtime: {sys.version.split()[0]}")
+        print("\n  Isto é típico de sdist com pins antigos em Python 3.12+.")
+        print("  Desbloqueio (roda agora, sem os extras frágeis):")
+        print(f'      !pip install -q -e "{RAIZ}[dev,mercado]"')
+    elif "no space left" in texto:
+        print("\n  DIAGNÓSTICO: disco cheio. Menu → Runtime → Disconnect and delete runtime.")
+    elif "could not find a version" in texto:
+        print("\n  DIAGNÓSTICO: nenhuma versão compatível com este Python.")
+        print(f"  Python deste runtime: {sys.version.split()[0]}")
+
+
 def baixar(url: str, destino: Path, *, mb: float = 0) -> bool:
-    """Baixa com barra de progresso. Devolve False se falhar (não aborta)."""
+    """Baixa com aviso de progresso. Devolve False se falhar (não aborta)."""
     destino.parent.mkdir(parents=True, exist_ok=True)
     tmp = destino.with_suffix(destino.suffix + ".parcial")
     print(f"   baixando {destino.name} (~{mb:.0f} MB)...", end=" ", flush=True)
-    r = sh(f'curl -fsSL --retry 3 --retry-delay 2 "{url}" -o "{tmp}"', critico=False)
+    r = subprocess.run(
+        f'curl -fsSL --retry 3 --retry-delay 2 "{url}" -o "{tmp}"',
+        shell=True, text=True, capture_output=True,
+    )
     if r.returncode or not tmp.exists() or tmp.stat().st_size < 100:
         tmp.unlink(missing_ok=True)
         print("falhou ⚠️")
@@ -93,6 +139,7 @@ print("=" * 62)
 print("  PyBR 2026 · Rumo ao Desconhecido: Tratando Drift em ML")
 print("  setup do ambiente")
 print("=" * 62)
+print(f"\n  Python {sys.version.split()[0]}  ·  Colab: {'sim' if IN_COLAB else 'não'}")
 
 if IN_COLAB:
     if (RAIZ / ".git").exists():
@@ -102,18 +149,41 @@ if IN_COLAB:
         print("\n[1/4] clonando repositório...")
         if RAIZ.exists():
             shutil.rmtree(RAIZ)
-        sh(f"git clone --depth 1 -q {REPO_URL} {RAIZ}")
+        sh(f"git clone --depth 1 -q {REPO_URL} {RAIZ}")   # CRÍTICO
     os.chdir(RAIZ)
 else:
     print("\n[1/4] fora do Colab — usando diretório atual como raiz")
     os.chdir(RAIZ)
 
 # =============================================================================
-#  2. instalação
+#  2. instalação EM CAMADAS
 # =============================================================================
-print("[2/4] instalando driftkit (modo editável) + dependências...")
-extras = "[dev,mercado]" if IN_COLAB else "[dev]"
-sh(f'pip install -q -e ".{extras}"')
+# Camada 1 (crítica): núcleo + dev. Sem isto, nada funciona.
+# Camada 2 (opcional): river — wheels puras, raramente falha.
+# Camada 3 (opcional): evidently — sdist grande, falha com alguma frequência.
+#
+# alibi-detect NÃO é instalado aqui, de propósito: em Python 3.12+ ele quebra
+# a geração de metadata e derrubava o setup inteiro. Está em
+# `[mercado-alibi]` para quem quiser tentar num venv com Python 3.11.
+print("[2/4] instalando em camadas...")
+
+print("      camada 1/3  núcleo + dev (crítica)...", end=" ", flush=True)
+sh('pip install -q -e ".[dev]"')   # CRÍTICO — só isto aborta
+print("ok ✅")
+
+for nome_camada, extra, rotulo in [
+    ("2/3", "mercado", "river"),
+    ("3/3", "mercado-evidently", "evidently"),
+]:
+    print(f"      camada {nome_camada}  {rotulo} (opcional)...", end=" ", flush=True)
+    r = subprocess.run(
+        f'pip install -q -e ".[{extra}]"', shell=True, text=True, capture_output=True
+    )
+    if r.returncode:
+        print("falhou ⚠️  (segue sem ele)")
+        _avisos.append(f"{rotulo} não instalou — a célula que o usa degrada sozinha")
+    else:
+        print("ok ✅")
 
 # cinto e suspensório: garante o src no path mesmo se o editable falhar
 src = str(RAIZ / "src")
@@ -135,14 +205,17 @@ for nome, _para, mb in ARQUIVOS_DADOS:
     if destino.exists():
         continue
     if nome in ESSENCIAL or not IN_COLAB:
-        baixar(f"{BASE_RELEASE}/{nome}", destino, mb=mb)
+        if not baixar(f"{BASE_RELEASE}/{nome}", destino, mb=mb):
+            if nome in ESSENCIAL:
+                _avisos.append(f"{nome} não baixou — o contrato v1 usará o default embutido")
 
 # =============================================================================
 #  4. diagnóstico
 # =============================================================================
 print("[4/4] diagnóstico\n")
 
-VERSOES_ESPERADAS = {
+# obrigatórios: ausência é FALHA
+OBRIGATORIOS = {
     "numpy": "1.26|2.",
     "pandas": "2.",
     "scipy": "1.",
@@ -150,25 +223,33 @@ VERSOES_ESPERADAS = {
     "pyarrow": "1",
     "typer": "0.",
     "pytest": "8.",
-    "evidently": "0.",
+}
+# opcionais: ausência é AVISO
+OPCIONAIS = {
     "river": "0.",
+    "evidently": "0.",
 }
 
 print(f"  {'pacote':<26}{'':<3}{'versão'}")
 print("  " + "-" * 46)
-_falhas: list[str] = []
-for pkg, prefixos in VERSOES_ESPERADAS.items():
-    try:
-        v = md.version(pkg)
-        ok = any(v.startswith(p) for p in prefixos.split("|"))
-        icone = "✅" if ok else "⚠️"
-        if not ok:
-            _falhas.append(f"{pkg} {v} (esperado ~{prefixos})")
-    except md.PackageNotFoundError:
-        v, icone = "AUSENTE", "❌"
-        # evidently/river/alibi são opcionais: ausência é aviso, não erro
-        (_falhas if pkg not in {"evidently", "river"} else []).append(f"{pkg} ausente")
-    print(f"  {pkg:<26}{icone:<3}{v}")
+for grupo, obrigatorio in ((OBRIGATORIOS, True), (OPCIONAIS, False)):
+    for pkg, prefixos in grupo.items():
+        try:
+            v = md.version(pkg)
+            ok = any(v.startswith(p) for p in prefixos.split("|"))
+            icone = "✅" if ok else "⚠️"
+            if not ok:
+                (_falhas if obrigatorio else _avisos).append(
+                    f"{pkg} {v} (esperado ~{prefixos})"
+                )
+        except md.PackageNotFoundError:
+            v = "ausente"
+            icone = "❌" if obrigatorio else "➖"
+            if obrigatorio:
+                _falhas.append(f"{pkg} ausente")
+            else:
+                _avisos.append(f"{pkg} ausente (opcional)")
+        print(f"  {pkg:<26}{icone:<3}{v}")
 
 print()
 print(f"  {'dado':<36}{'':<3}{'tamanho'}")
@@ -183,27 +264,33 @@ for nome, para, _mb in ARQUIVOS_DADOS:
 
 print()
 try:
-    import src.driftkit as driftkit  # noqa: F401
+    import driftkit
 
     importlib.reload(driftkit)
-    from src.driftkit.detectors import psi  # noqa: F401
+    from driftkit.detectors import piso_analitico, psi  # noqa: F401
 
     print(f"  {'import driftkit':<36}{'✅':<3}v{driftkit.__version__}")
 except Exception as e:  # noqa: BLE001
     print(f"  {'import driftkit':<36}{'❌':<3}{type(e).__name__}: {e}")
     _falhas.append("import driftkit")
 
-r = sh("driftkit --help", critico=False)
+r = sh("driftkit --help", critico=False, linhas_erro=5)
 if r.returncode == 0:
     print(f"  {'CLI driftkit':<36}{'✅':<3}disponível no PATH")
 else:
     print(f"  {'CLI driftkit':<36}{'⚠️':<3}use `python -m driftkit` no lugar")
+    _avisos.append("CLI fora do PATH — use `python -m driftkit`")
 
 # suíte rápida: se ela passa, o ambiente está bom de verdade
-r = sh("pytest -q -m 'not lento and not requer_bosch and not mercado' --no-header", critico=False)
+r = subprocess.run(
+    "pytest -q -m 'not lento and not requer_bosch and not mercado' --no-header",
+    shell=True, text=True, capture_output=True,
+)
 ultima = (r.stdout or "").strip().splitlines()
 print(f"  {'suíte de testes':<36}{'✅' if r.returncode == 0 else '⚠️':<3}"
       f"{ultima[-1] if ultima else 'sem saída'}")
+if r.returncode:
+    _falhas.append("suíte de testes falhando")
 
 # =============================================================================
 #  autoreload + variáveis de conveniência
@@ -217,10 +304,15 @@ except Exception:  # noqa: BLE001
 
 print("\n" + "=" * 62)
 if _falhas:
-    print("  ⚠️  ATENÇÃO — pendências encontradas:")
+    print("  ❌ PENDÊNCIAS QUE IMPEDEM O TUTORIAL:")
     for f in _falhas:
         print(f"       • {f}")
     print("\n  Levante o cartão 🔴 AGORA. Não avance sozinho.")
+elif _avisos:
+    print("  ✅ AMBIENTE PRONTO — com degradações aceitáveis:")
+    for a in _avisos:
+        print(f"       • {a}")
+    print("\n  Nada disso impede o tutorial. Levante o cartão 🟢.")
 else:
     print("  ✅ AMBIENTE PRONTO. Levante o cartão 🟢.")
 print(f"\n  RAIZ = {RAIZ}")
