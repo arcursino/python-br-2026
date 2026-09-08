@@ -1,5 +1,5 @@
 # =============================================================================
-#  pyproject.toml — arcursino/python-br-2026
+#  pyproject.toml — pybr2026-drift
 #  Backend: hatchling (já disponível no Colab via pip; não precisa instalar nada)
 # =============================================================================
 [build-system]
@@ -13,7 +13,7 @@ description = "Detecção de data e concept drift com calibração por dataset s
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Seu Nome", email = "voce@exemplo.com" }]
+authors = [{ name = "Ariana Cursino", email = "arcursino@gmail.conceptom" }]
 keywords = ["drift", "mlops", "monitoring", "manufacturing"]
 
 # --- Faixas largas de propósito: o Colab troca de versão sem avisar. ---------
@@ -30,13 +30,17 @@ dependencies = [
     "requests>=2.31",   # backend http do fsspec
 ]
 
+# =============================================================================
+#  EXTRAS — organizados por RISCO DE QUEBRA, não por tema.
+#
+#  Lição aprendida na véspera: um único pacote opcional com metadata ruim
+#  derruba `pip install -e ".[dev,mercado]"` inteiro, e o tutorial não abre.
+#  A separação abaixo existe para que o setup instale em CAMADAS e siga
+#  em frente quando uma camada opcional falha.
+# =============================================================================
 [project.optional-dependencies]
-# Bibliotecas de mercado — prometidas na ementa, usadas para validação cruzada.
-mercado = [
-    "evidently>=0.4",
-    "alibi-detect>=0.12",
-    "river>=0.21",
-]
+
+# --- obrigatório: sem isto os notebooks não rodam ---------------------------
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
@@ -44,11 +48,37 @@ dev = [
     "ruff>=0.6",
 ]
 
+# --- desejável: wheels puras, instalam em qualquer Python 3.10–3.13 ---------
+# `river` traz extensões Cython, mas publica wheels para cp310–cp313.
+mercado = [
+    "river>=0.21",
+]
+
+# --- opcional: sdist grande, resolução lenta, quebra com facilidade --------
+# O evidently empacota um frontend e a resolução de metadata é pesada.
+# Vale para a validação cruzada do Bloco II-A, mas NÃO é pré-requisito.
+mercado-evidently = [
+    "evidently>=0.4",
+]
+
+# --- frágil: NÃO instale em sala. Documentado, não executado. --------------
+# alibi-detect >=0.12 arrasta TensorFlow/PyTorch com pins antigos e falha a
+# geração de metadata em Python 3.12+ ("Preparing metadata did not run
+# successfully"). Use um venv dedicado com Python 3.11 se quiser explorar.
+mercado-alibi = [
+    "alibi-detect>=0.12",
+]
+
+# --- conveniência para quem roda local e quer tudo --------------------------
+tudo = [
+    "driftkit[dev,mercado,mercado-evidently]",
+]
+
 [project.scripts]
 driftkit = "driftkit.cli:app"
 
 [project.urls]
-Repositorio = "https://github.com/arcursino/python-br-2026"
+Repositorio = "https://github.com/SEU_USUARIO/pybr2026-drift"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/driftkit"]
@@ -63,7 +93,7 @@ addopts = "-q --strict-markers --strict-config"
 markers = [
     "lento: leva mais de 5s (desative com -m 'not lento')",
     "requer_bosch: precisa dos parquets do Bosch em data/",
-    "mercado: precisa de evidently/alibi-detect/river",
+    "mercado: precisa de river/evidently (extras opcionais)",
 ]
 filterwarnings = [
     "error::DeprecationWarning:driftkit.*",   # nosso código não deprecia em silêncio
