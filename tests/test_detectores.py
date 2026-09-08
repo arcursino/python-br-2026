@@ -141,9 +141,9 @@ class TestProvaCruzada:
         base = janela(df, 45).query("equipamento == 'CEL-02'")
         m_base = metricas(modelo, base, num=NUM, cat=CAT)
         m_tc3 = metricas(modelo, seg, num=NUM, cat=CAT)
-        assert m_tc3.roc_auc < m_base.roc_auc - 0.15, (
-            f"esperava colapso localizado: base={m_base.roc_auc:.3f} tc3={m_tc3.roc_auc:.3f}"
-        )
+            assert m_tc3.roc_auc < m_base.roc_auc - 0.15, (
+        f"esperava colapso localizado: base={m_base.roc_auc:.3f} tc3={m_tc3.roc_auc:.3f}"
+    )
 
     def test_a_diagonal(self, detector, modelo, df):
         """O tutorial inteiro em um assert.
