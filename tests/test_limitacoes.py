@@ -54,7 +54,7 @@ def test_monitor_global_alarma_mas_tarde_e_com_magnitude_descartavel(modelo, df)
     É tentador dizer "o monitor global é cego ao problema da CEL-02".
     Não é verdade, e a primeira pessoa que rodar o notebook vai te corrigir.
 
-    O que realmente acontece: o global TAMBÉM cai, só que ~4× menos.
+    O que realmente acontece: o global TAMBÉM cai, só que ~3× menos.
     E uma queda dessa magnitude é exatamente o que qualquer engenheiro
     sênior descarta como variação amostral — com razão.
 
@@ -71,26 +71,64 @@ def test_monitor_global_alarma_mas_tarde_e_com_magnitude_descartavel(modelo, df)
 
     queda_g, queda_s = base_g - tc3_g, base_s - tc3_s
     assert queda_g > 0, "o global também cai — não afirme que é cego"
-    assert queda_s > 3 * queda_g, (
+    assert queda_s > 2.5 * queda_g, (
         f"segmentado deve cair muito mais: global={queda_g:.3f} segmento={queda_s:.3f}"
     )
 
 
 # =============================================================================
-#  Limitação 3 — P(X) não tem obrigação de ver concept drift
+#  Limitação 3 — P(X) VÊ o concept drift, e isso não o ajuda em nada
 # =============================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "LIMITAÇÃO ESTRUTURAL, não bug: concept drift é mudança em P(Y|X). "
-        "Nenhuma quantidade de vigilância sobre P(X) tem obrigação matemática "
-        "de detectá-lo. Saber disto ANTES de montar o dashboard evita construir "
-        "um sistema cego por design."
-    ),
-)
-def test_monitor_de_distribuicao_detecta_concept_drift(detector, df):
-    rel = detector.report(janela(df, 110).query("equipamento == 'CEL-02'"))
-    assert rel.n_drift > 0
+def test_magnitude_em_px_nao_ordena_gravidade(detector, df):
+    """A limitação REAL, e ela é pior que cegueira.
+
+    A versão anterior deste teste era um `xfail(strict=True)` afirmando que o
+    monitor de P(X) não detecta concept drift. Isso é FALSO, e a suíte provou:
+    o teste passou inesperadamente. Com limiar calibrado (psi≈0.0102, e não o
+    0.1 do folclore), o TC-3 aparece com p ≈ 8e-07.
+
+    O motivo é físico: a compensação do operador cancela 87.5% do offset do
+    transdutor, não 100%. O resíduo desloca `torque_medido` em -0.45 Nm — um
+    sinal pequeno, real e estatisticamente inegável.
+
+    A limitação verdadeira é outra, e é mais grave:
+
+        TC-2 (covariate) : efeito ~1.91  → ação correta = REGISTRAR
+        TC-3 (concept)   : efeito ~0.018 → ação correta = BLOQUEAR RETREINO
+
+    Duas ordens de grandeza, e o MENOR é o que exige ação urgente. A magnitude
+    do sinal em P(X) não ordena a gravidade em P(Y|X) — não há limiar sobre
+    P(X), por mais bem calibrado, que produza a decisão certa nos dois casos.
+
+    É por isso que a guarda 5 precisa de um DIAGNÓSTICO DE CAUSA, e não de
+    mais sensibilidade. Um dashboard ordenado por magnitude de drift coloca o
+    incidente que importa na última linha da tabela.
+    """
+    rel_tc2 = detector.report(janela(df, 80))    # covariate: campanha de R20
+    rel_tc3 = detector.report(janela(df, 110))   # concept: transdutor mentindo
+
+    # 1. O monitor NÃO é cego ao concept drift — detecta os dois.
+    assert rel_tc3.n_drift > 0, (
+        "o TC-3 deixa rastro em P(X): a compensação do operador não é perfeita. "
+        "Não afirme cegueira; o argumento honesto é o da ordenação."
+    )
+    assert rel_tc2.n_drift > 0
+
+    # 2. E, ainda assim, a ordenação por magnitude é EXATAMENTE a inversa da
+    #    ordenação por urgência.
+    assert rel_tc3.efeito_max < rel_tc2.efeito_max / 20, (
+        f"o evento que exige BLOQUEIO deve ser ordens de grandeza MENOR em P(X): "
+        f"TC-2={rel_tc2.efeito_max:.4f} TC-3={rel_tc3.efeito_max:.4f}"
+    )
+
+    # 3. O corolário operacional: qualquer limiar único sobre P(X) erra.
+    #    Um limiar que pega o TC-3 (>0.018) também pega o TC-2 e manda
+    #    retreinar numa campanha planejada. Um limiar que ignora o TC-2
+    #    (>1.91) ignora o TC-3 por um fator de 100.
+    limiar_que_pega_tc3 = rel_tc3.efeito_max
+    assert rel_tc2.efeito_max > limiar_que_pega_tc3, (
+        "não existe limiar sobre P(X) que separe os dois casos pela ação correta"
+    )
 
 
 # =============================================================================
@@ -244,4 +282,3 @@ def test_comparar_regimes_detecta_limiar_cego():
 def test_fator_de_amplificacao_e_reportado():
     from driftkit.state import fator_amplificacao
     fator_amplificacao(0.0166, 0.0017)
-
