@@ -16,7 +16,7 @@ Linha do tempo (130 dias, 4 células de aperto):
     dia   30– 59  TC-1  estável     controle NEGATIVO: exigimos SILÊNCIO
     dia   60– 89  TC-2  covariate   campanha de aro R20 (planejada)
                                     → P(X) muda muito, P(Y|X) intacto
-    dia   90–119  TC-3  concept     transdutor da CEL-02 com offset +10 Nm
+    dia   90–119  TC-3  concept     transdutor da CEL-02 com offset +3.5 Nm
                                     → P(X) quase intacto, P(Y|X) MENTE
     dia  120–124  TC-3' recalibrado metrologia corrige → recuperação imediata
     dia  125–130  TC-4  data qual.  tag do PLC volta a publicar em kPa
@@ -25,6 +25,51 @@ Linha do tempo (130 dias, 4 células de aperto):
 A prova cruzada TC-2 × TC-3 é o experimento fundamental do tutorial:
 duas situações que exigem respostas OPOSTAS e que um detector ingênuo
 confunde.
+
+CALIBRAÇÃO DO OFFSET DO TC-3 (por que 3.5 e não 10)
+---------------------------------------------------
+O rótulo passa por uma logística com coeficiente 0.62 sobre o desvio absoluto
+de torque. Com offset de 10 Nm, o logito no segmento afetado vai a ~+2.4 e a
+prevalência de falha satura em ~91%: a classe negativa praticamente
+desaparece, o AUC do segmento deixa de ter significado estatístico e — pior —
+não tem mais de onde CAIR. A prevalência global subia para ~31%, o que fazia
+o monitor agregado despencar mais que o segmentado, invertendo a tese do
+tutorial.
+
+Varredura medida (seed=7):
+
+    offset   prev_seg   prev_glob
+      2.0      0.164      0.116
+      3.0      0.250      0.138
+      3.5      ~0.30      ~0.15     ← escolhido
+      4.0      0.347      0.161
+      6.0      0.578      0.219
+     10.0      0.909      0.301     ← saturado
+
+Com 3.5 Nm a degradação é inequívoca (3× a prevalência de referência) e ainda
+sobram ~70% de negativos no segmento, o que dá um AUC estável. O efeito na
+janela global fica modesto — que é exatamente o ponto pedagógico: a
+segmentação não transforma o invisível em visível, ela transforma o
+DESCARTÁVEL em ACIONÁVEL.
+
+POR QUE `desvio_torque_abs` EXISTE
+----------------------------------
+O rótulo depende de `abs(torque_real - ALVO)`: a peça falha tanto por aperto
+excessivo quanto por aperto insuficiente. Essa é uma função em V, e um termo
+LINEAR sobre `torque_medido` é cego a ela — os dois lados do V se cancelam.
+Sem a feature de desvio absoluto, uma regressão logística fica com AUC ~0.56
+já no baseline, e toda "queda de performance" medida depois é ruído em cima
+de um modelo que nunca aprendeu nada.
+
+`desvio_torque_abs` é calculado sobre a LEITURA DO SENSOR, nunca sobre
+`torque_real`:
+
+    desvio_torque_abs = abs(torque_medido - TORQUE_ALVO)
+
+Isso é engenharia de feature que qualquer engenheiro de processo faria — e
+torna a lição do TC-3 mais forte, não mais fraca: o modelo é razoável, tem
+a feature fisicamente correta, e MESMO ASSIM o sensor o engana. Bem mais
+convincente que "modelo ruim continuou ruim".
 """
 
 from __future__ import annotations
@@ -37,11 +82,16 @@ import pandas as pd
 __all__ = [
     "gerar_fixture",
     "janela",
+    "gabarito",
+    "validar_fixture",
+    "cpk",
+    "ppm_fora_spec",
     "NUM",
     "CAT",
     "FEATS",
     "RANGES",
     "EVENTOS",
+    "OFFSET_TORQUE_PADRAO",
     "TORQUE_ALVO",
     "TORQUE_LSL",
     "TORQUE_USL",
@@ -56,12 +106,24 @@ TORQUE_LSL = 105.0    # limite inferior de especificação
 TORQUE_USL = 115.0    # limite superior
 TORQUE_SIGMA = 1.15   # dá Cpk ≈ 1.45 no baseline → processo CONFORME
 
+# Offset do transdutor no TC-3. Ver a nota de calibração no topo do módulo
+# antes de mexer: este número está amarrado ao coeficiente 0.62 da logística
+# do rótulo e aos limiares de vários testes.
+OFFSET_TORQUE_PADRAO = 3.5
+
 CELULAS = ("CEL-01", "CEL-02", "CEL-03", "CEL-04")
 AROS = ("R16", "R17", "R18", "R20")
 TURNOS = ("A", "B", "C")
 FORNECEDORES = ("FORN-A", "FORN-B", "FORN-C")
 
-NUM = ("torque_medido", "pressao_psi", "temperatura_c", "tempo_ciclo_s", "angulo_giro_deg")
+NUM = (
+    "torque_medido",
+    "desvio_torque_abs",   # ver "POR QUE `desvio_torque_abs` EXISTE" no topo
+    "pressao_psi",
+    "temperatura_c",
+    "tempo_ciclo_s",
+    "angulo_giro_deg",
+)
 CAT = ("aro", "turno", "fornecedor", "equipamento")
 FEATS = (*NUM, *CAT)
 
@@ -71,6 +133,7 @@ FEATS = (*NUM, *CAT)
 # dados, não de modelo.
 RANGES: dict[str, tuple[float, float]] = {
     "torque_medido": (90.0, 130.0),
+    "desvio_torque_abs": (0.0, 20.0),   # derivado de torque_medido
     "pressao_psi": (25.0, 45.0),
     "temperatura_c": (10.0, 45.0),
     "tempo_ciclo_s": (8.0, 40.0),
@@ -101,7 +164,7 @@ EVENTOS: tuple[Evento, ...] = (
            "nada — este é o controle negativo", False, False),
     Evento("TC-2", 60, 89, "campanha de aro R20", "covariate", 2, "negocio",
            "registrar; NÃO retreinar", True, False),
-    Evento("TC-3", 90, 119, "offset +10 Nm no transdutor da CEL-02", "concept", 3, "hardware",
+    Evento("TC-3", 90, 119, "offset +3.5 Nm no transdutor da CEL-02", "concept", 3, "hardware",
            "ordem de serviço para metrologia; BLOQUEAR retreino", False, True),
     Evento("TC-3'", 120, 124, "ferramenta recalibrada", "nenhum", 0, "nenhuma",
            "encerrar o incidente", False, False),
@@ -118,7 +181,7 @@ def gerar_fixture(
     seed: int = 7,
     n_por_dia: int = 900,
     dias: int = 130,
-    offset_torque: float = 10.0,
+    offset_torque: float = OFFSET_TORQUE_PADRAO,
     celula_afetada: str = "CEL-02",
 ) -> pd.DataFrame:
     """Gera a fixture completa, determinística dado `seed`.
@@ -127,19 +190,35 @@ def gerar_fixture(
     ------------------------------------------------
     A falha é aplicada ao valor *reportado*, não ao processo:
 
-        torque_real     ~ N(110, 1.15)      ← a física NÃO mudou
-        torque_medido    = torque_real - 10  ← o SENSOR mente (lê 10 a menos)
+        torque_real   ~ N(110, 1.15)                 ← a física NÃO mudou
+        torque_real  += offset · U(0.75, 1.00)       ← o operador COMPENSA
+        torque_medido = torque_real - offset         ← o SENSOR mente
 
-    O operador vê 100 Nm, acha que está frouxo, e o aparafusador compensa
-    apertando mais. O torque real vai a ~120 Nm: fora da especificação
-    superior, gerando trinca no cubo.
+    O transdutor lê baixo, o operador acha que está frouxo e o aparafusador
+    compensa apertando mais. O torque real sobe e sai da especificação
+    superior, gerando trinca no cubo — mas a LEITURA parece normal.
 
-    Consequência para o modelo: a feature `torque_medido` continua com uma
-    distribuição PARECIDA com a de referência (média deslocada de 10 num range
-    de 40) — mas o mapeamento feature → falha inverteu. Isso é concept drift
-    puro: P(Y|X) mudou. Nenhum teste sobre P(X) tem obrigação de pegar isso,
-    e é exatamente por isso que a suíte precisa de um teste que PROVE a
-    limitação em vez de assumi-la.
+    Por que isto é concept drift quase PURO
+    ---------------------------------------
+    A compensação do operador cancela quase todo o deslocamento aparente:
+
+        Δ_medido = 0.875 · offset − offset = −0.125 · offset
+
+    Com offset de 3.5 Nm são −0.44 Nm no segmento afetado. Como a CEL-02 é
+    ~25% da janela, sobram ~−0.11 Nm na média global: 0.3% de um range de
+    40 Nm. Invisível para PSI, KS ou qualquer teste sobre P(X) — e é
+    exatamente por isso que a suíte precisa de um teste que PROVE a limitação
+    em vez de assumi-la.
+
+    A pista que SOBRA (e que é didática de propósito)
+    -------------------------------------------------
+    `angulo_giro_deg` é função do torque REAL, não da leitura. Ele vaza a
+    compensação do operador: ~0.8 · 3.06 ≈ 2.4° num sigma de 18°, isto é
+    ~0.14σ, concentrado na CEL-02. Pequeno, real, e invisível na agregada.
+
+    Não é bug: é fisicamente correto e é a única pista que um detector
+    SEGMENTADO consegue encontrar. Não espere silêncio total de P(X) no TC-3;
+    espere um sussurro numa única feature, audível só quando se segmenta.
 
     Parameters
     ----------
@@ -147,6 +226,10 @@ def gerar_fixture(
         Um seed que passa não é um teste que passa. Veja
         `tests/test_detectores.py::test_controle_negativo_robusto_a_seed`,
         que roda o controle negativo em 8 seeds diferentes.
+    offset_torque : float
+        Erro do transdutor, em Nm. O default está calibrado para dar
+        prevalência de falha ~30% no segmento afetado. Ver a nota
+        "CALIBRAÇÃO DO OFFSET DO TC-3" no topo do módulo antes de alterar.
     """
     rng = np.random.default_rng(seed)
     partes: list[pd.DataFrame] = []
@@ -198,6 +281,12 @@ def gerar_fixture(
         if dia >= 125:
             pressao = pressao * PSI_TO_KPA
 
+        # --- feature derivada: desvio absoluto da ESPECIFICAÇÃO --------------
+        # Calculada sobre a LEITURA (torque_medido), nunca sobre torque_real.
+        # É o que dá ao modelo linear acesso à forma em V do rótulo — e é
+        # justamente ela que o sensor mentiroso corrompe no TC-3.
+        desvio_torque_abs = np.abs(torque_medido - TORQUE_ALVO)
+
         # --- rótulo: função do MUNDO FÍSICO, nunca da leitura do sensor -----
         # Falha por torque fora de especificação, com margem suave.
         desvio = np.abs(torque_real - TORQUE_ALVO)
@@ -221,6 +310,7 @@ def gerar_fixture(
                     "turno": turno,
                     "fornecedor": fornecedor,
                     "torque_medido": torque_medido.astype(np.float32),
+                    "desvio_torque_abs": desvio_torque_abs.astype(np.float32),
                     "torque_real": torque_real.astype(np.float32),  # ⚠️ só para gabarito
                     "pressao_psi": pressao.astype(np.float32),
                     "temperatura_c": temperatura.astype(np.float32),
@@ -259,11 +349,20 @@ def gabarito(dia: int) -> Evento | None:
     return None
 
 
-def validar_fixture(df: pd.DataFrame) -> pd.DataFrame:
+def validar_fixture(
+    df: pd.DataFrame,
+    *,
+    offset_esperado: float = OFFSET_TORQUE_PADRAO,
+) -> pd.DataFrame:
     """Testa a FIXTURE, não o detector.
 
     Fixture errada faz o detector parecer errado. Antes de acreditar em
     qualquer resultado, verificamos que plantamos o que dissemos que plantamos.
+
+    Vários checks aqui têm TETO, não só piso. Um piso solitário é cúmplice:
+    a versão anterior exigia apenas `f_tc3 > prev * 1.5`, e 91% de falha
+    passava folgado — foi assim que a saturação do offset sobreviveu a uma
+    suíte verde e só apareceu como seis testes quebrados lá na frente.
     """
     checks: list[dict] = []
 
@@ -279,7 +378,11 @@ def validar_fixture(df: pd.DataFrame) -> pd.DataFrame:
 
     tc3 = df.query("90 <= dia <= 119 and equipamento == 'CEL-02'")
     gap = (tc3["torque_real"] - tc3["torque_medido"]).mean()
-    add("TC-3: sensor lê ~10 Nm a menos", 8.0 < gap < 12.0, f"{gap:.2f} Nm")
+    add(
+        f"TC-3: sensor lê ~{offset_esperado:.1f} Nm a menos",
+        abs(gap - offset_esperado) < 0.5 + 0.1 * offset_esperado,
+        f"{gap:.2f} Nm",
+    )
 
     outras = df.query("90 <= dia <= 119 and equipamento != 'CEL-02'")
     gap_o = (outras["torque_real"] - outras["torque_medido"]).abs().mean()
@@ -295,8 +398,39 @@ def validar_fixture(df: pd.DataFrame) -> pd.DataFrame:
     add("TC-1 tem prevalência igual à referência (±3pp)", abs(f_tc1 - prev) < 0.03,
         f"{f_tc1:.1%} vs {prev:.1%}")
 
-    f_tc3 = df.query("90 <= dia <= 119 and equipamento == 'CEL-02'")["falha"].mean()
-    add("TC-3 eleva a falha na CEL-02", f_tc3 > prev * 1.5, f"{f_tc3:.1%} vs {prev:.1%}")
+    # --- os três checks que faltavam ------------------------------------------
+    f_tc3 = tc3["falha"].mean()
+    add(
+        "TC-3 eleva a falha na CEL-02 SEM SATURAR",
+        prev * 1.5 < f_tc3 < 0.45,
+        f"{f_tc3:.1%} (esperado entre {prev * 1.5:.1%} e 45%)",
+    )
+
+    f_tc3_glob = df.query("90 <= dia <= 119")["falha"].mean()
+    add(
+        "TC-3 NÃO contamina a prevalência global",
+        f_tc3_glob < prev * 1.7,
+        f"{f_tc3_glob:.1%} vs {prev:.1%} na referência",
+    )
+
+    # A classe negativa tem que sobrar no segmento, senão o AUC não significa
+    # nada — e um AUC sem significado não pode CAIR, que é o que o TC-3 precisa
+    # demonstrar.
+    neg_seg = (1.0 - f_tc3) * len(tc3)
+    add(
+        "TC-3 preserva classe negativa suficiente no segmento",
+        neg_seg > 500 and f_tc3 < 0.45,
+        f"{neg_seg:.0f} negativos ({1 - f_tc3:.0%} do segmento)",
+    )
+
+    # O deslocamento APARENTE precisa continuar pequeno: é a definição
+    # operacional de "concept drift quase puro".
+    delta_medido = tc3["torque_medido"].mean() - ref["torque_medido"].mean()
+    add(
+        "TC-3: P(X) do torque_medido quase intacto (<1 Nm)",
+        abs(delta_medido) < 1.0,
+        f"{delta_medido:+.2f} Nm",
+    )
 
     return pd.DataFrame(checks)
 
