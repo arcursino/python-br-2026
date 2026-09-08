@@ -212,9 +212,36 @@ class TestContrato:
 # =============================================================================
 #  Fator de amplificação — o entregável da ponte Parte I → Parte II
 # =============================================================================
+def test_comparar_regimes_detecta_limiar_cego():
+    """O limiar do sintético, no Bosch, deixa o detector CEGO — não ruidoso.
+
+    Substitui test_fator_de_amplificacao_e_reportado. A premissa antiga era
+    que o piso CRESCE do sintético para o real; ele cai, porque
+    piso ∝ (1/n + 1/m) e a janela do Bosch é ~15x maior.
+    """
+    from driftkit.detectors import piso_analitico
+    from driftkit.state import comparar_regimes
+
+    v1 = {"n_referencia": 27_000, "k_features_num": 9, "bins": 10,
+          "piso_aa": 0.0166, "psi_alarme_sugerido": 0.050,
+          "piso_analitico": piso_analitico(13_500, 13_500, bins=10, k_features=9)}
+    v2 = {"n_referencia": 160_000, "k_features_num": 160, "bins": 10,
+          "piso_aa": 0.0017, "psi_alarme_sugerido": 0.005,
+          "piso_analitico": piso_analitico(160_000, 40_000, bins=10, k_features=160)}
+
+    r = comparar_regimes(v1, v2, nome_v1="sintético", nome_v2="Bosch")
+
+    assert r["limiar_v1_em_pisos_de_v2"] > 10
+    assert "CEGO" in r["veredicto"]
+    assert r["razao_dos_pisos"] < 1.0      # o piso CAI, não cresce
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "fator_amplificacao() foi removida: partia da premissa falsa de que o "
+    "piso de ruído CRESCE do sintético para o real. Ele cai com o tamanho "
+    "da janela. Use comparar_regimes()."
+))
 def test_fator_de_amplificacao_e_reportado():
     from driftkit.state import fator_amplificacao
+    fator_amplificacao(0.0166, 0.0017)
 
-    r = fator_amplificacao(piso_sintetico=0.012, piso_real=0.180)
-    assert r["fator"] == pytest.approx(15.0, rel=0.01)
-    assert "ordem de magnitude" in r["veredicto"]
