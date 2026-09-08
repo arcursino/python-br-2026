@@ -117,8 +117,13 @@ TURNOS = ("A", "B", "C")
 FORNECEDORES = ("FORN-A", "FORN-B", "FORN-C")
 
 NUM = (
+    # `desvio_torque_abs` entra no MODELO mas NÃO no detector: é derivada de
+    # `torque_medido`, que já é monitorado. Vigiar as duas contaria o mesmo
+    # sinal físico duas vezes na correção de Bonferroni — piorando a
+    # sensibilidade de todas as outras features para não ganhar informação
+    # nenhuma. Monitore a origem, não a derivação.
     "torque_medido",
-    "desvio_torque_abs",   # ver "POR QUE `desvio_torque_abs` EXISTE" no topo
+    "desvio_torque_abs",   
     "pressao_psi",
     "temperatura_c",
     "tempo_ciclo_s",
