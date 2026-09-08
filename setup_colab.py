@@ -3,7 +3,7 @@ setup_colab.py — bootstrap idempotente para Google Colab.
 
 USO NO NOTEBOOK (célula 0, duas linhas):
 
-    !curl -sSL https://raw.githubusercontent.com/SEU_USUARIO/pybr2026-drift/main/setup_colab.py -o /tmp/s.py
+    !curl -sSL https://raw.githubusercontent.com/arcursino/python-br-2026/main/setup_colab.py -o /tmp/s.py
     %run /tmp/s.py
 
 Ou, se o repositório já foi clonado:
@@ -41,8 +41,8 @@ from pathlib import Path
 # =============================================================================
 #  CONFIGURAÇÃO — ajuste estas três linhas para o seu repositório
 # =============================================================================
-GH_USER = "SEU_USUARIO"
-GH_REPO = "pybr2026-drift"
+GH_USER = "arcursino"
+GH_REPO = "python-br-2026"
 TAG_DADOS = "dados-v1"  # tag do Release que contém os .parquet
 
 REPO_URL = f"https://github.com/{GH_USER}/{GH_REPO}.git"
