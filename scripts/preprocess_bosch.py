@@ -190,6 +190,15 @@ def construir_meta(
     meta["semana"] = np.floor(meta["t_min"] * UNIDADE_TEMPO_SEMANAS).astype("Int32")
     meta["quinzena"] = (meta["semana"] // 2).astype("Int32")
 
+    # Peças que não registram timestamp em NENHUMA estação produzem NaN em
+    # t_min (nanmin de linha toda-NaN). Elas não têm posição no eixo temporal,
+    # que é o artefato inteiro deste script — então saem, contadas em voz alta.
+    sem_tempo = int(meta["t_min"].isna().sum())
+    if sem_tempo:
+        log(f"  ⚠️  {sem_tempo:,} peças sem nenhum timestamp — descartadas "
+            f"({sem_tempo / len(meta):.4%})")
+        meta = meta[meta["t_min"].notna()].copy()
+
     meta = meta.sort_values("t_min", kind="stable").reset_index(drop=True)
 
     log(f"\nmeta construída: {len(meta):,} peças × {meta.shape[1]} colunas")
@@ -241,7 +250,11 @@ def selecionar_features(
         val = ~np.isnan(arr)
         n_validos += val.sum(axis=0)
         soma += np.nansum(arr, axis=0)
-        soma_q += np.nansum(arr**2, axis=0)
+        # `arr**2` alocava um SEGUNDO array de 100k × 968 float64 (~775 MB) a
+        # cada chunk. `np.square(arr, out=arr)` faz o quadrado no lugar — e por
+        # isso a soma simples tem que ser calculada ANTES desta linha.
+        np.square(arr, out=arr)
+        soma_q += np.nansum(arr, axis=0)
         n_total += len(ch)
         del ch, arr, val
         gc.collect()
@@ -250,17 +263,28 @@ def selecionar_features(
 
     with np.errstate(all="ignore"):
         media = soma / np.maximum(n_validos, 1)
-        var = soma_q / np.maximum(n_validos, 1) - media**2
+        # E[X²] − E[X]² sofre cancelamento catastrófico quando a média é grande
+        # perto do desvio (sensor que oscila 0.01 em torno de 1500). O
+        # resultado vira negativo ou zero e a feature é descartada como
+        # "constante" sendo perfeitamente monitorável. `maximum(.., 0)` só
+        # esconde o sintoma; o critério abaixo passa a ser o COEFICIENTE de
+        # variação, que é adimensional e não depende dessa subtração ficar
+        # numericamente estável.
+        var = np.maximum(soma_q / np.maximum(n_validos, 1) - media**2, 0.0)
+        cv = np.sqrt(var) / np.maximum(np.abs(media), 1e-12)
 
     perfil = pd.DataFrame({
         "col": feats,
         "cobertura": n_validos / max(n_total, 1),
         "variancia": np.where(n_validos > 100, var, 0.0),
+        "cv": np.where(n_validos > 100, cv, 0.0),
     })
     topo = parsear_topologia(feats)
     perfil = perfil.merge(topo[["col", "station", "linha", "estacao"]], on="col", how="left")
 
-    elegiveis = perfil.query("cobertura >= @COBERTURA_MINIMA and variancia > 1e-12").copy()
+    elegiveis = perfil.query(
+        "cobertura >= @COBERTURA_MINIMA and (variancia > 1e-12 or cv > 1e-9)"
+    ).copy()
     log(f"  {len(elegiveis):,} de {len(feats):,} features elegíveis")
 
     # diversidade: no máximo 6 por estação, priorizando cobertura
@@ -271,9 +295,21 @@ def selecionar_features(
         .head(n_alvo)["col"]
         .tolist()
     )
-    if len(escolhidas) < n_alvo:  # completa se a cota por estação foi restritiva
-        resto = [c for c in elegiveis["col"] if c not in set(escolhidas)]
-        escolhidas += resto[: n_alvo - len(escolhidas)]
+    if len(escolhidas) < n_alvo:
+        # A versão anterior completava com QUALQUER feature elegível — inclusive
+        # a 7ª, 8ª e 9ª da mesma estação já saturada, desfazendo exatamente a
+        # diversidade espacial que o passo acima construiu. Agora a cota é
+        # afrouxada em rodadas: 7 por estação, 8, 9... e o resultado continua
+        # espalhado pela fábrica.
+        cota = 6
+        while len(escolhidas) < n_alvo and cota < 30:
+            cota += 1
+            escolhidas = (
+                elegiveis.groupby("station", observed=True, group_keys=False)
+                .head(cota)
+                .head(n_alvo)["col"]
+                .tolist()
+            )
 
     n_est = perfil.query("col in @escolhidas")["station"].nunique()
     log(f"  {len(escolhidas)} features selecionadas, distribuídas em {n_est} estações")
@@ -300,32 +336,48 @@ def carregar_features(
 # =============================================================================
 #  4. Verificação — nunca publique um artefato que você não conferiu
 # =============================================================================
-def verificar(meta: pd.DataFrame, feats: pd.DataFrame) -> bool:
-    """Checagens que, se falharem, invalidam tudo que vem depois."""
+def verificar(meta: pd.DataFrame, feats: pd.DataFrame, *, amostra: bool = False) -> bool:
+    """Checagens que, se falharem, invalidam tudo que vem depois.
+
+    `amostra=True` degrada para AVISO as checagens que só fazem sentido no
+    dataset completo. Sem isso, `--amostra 50000` sempre reprovava — as 50 mil
+    primeiras linhas cobrem ~1 semana e a taxa de falha oscila — e o modo
+    "testar o script em 2 min" nunca gravava arquivo nenhum. Um smoke test que
+    sempre falha não é um smoke test.
+    """
     log("\nverificando artefatos...")
     ok = True
+    if amostra:
+        log("  (modo --amostra: checagens de escala viram ⚠️, não ❌)")
 
-    def chk(nome: str, cond: bool, obs: str = "") -> None:
+    def chk(nome: str, cond: bool, obs: str = "", *, escala: bool = False) -> None:
         nonlocal ok
-        ok &= bool(cond)
-        print(f"  {'✅' if cond else '❌'} {nome:<46} {obs}")
+        cond = bool(cond)
+        if cond:
+            icone = "✅"
+        elif escala and amostra:
+            icone = "⚠️ "
+        else:
+            icone = "❌"
+            ok = False
+        print(f"  {icone} {nome:<46} {obs}")
 
     chk("Id único em meta", meta["Id"].is_unique, f"{meta['Id'].nunique():,}")
     chk("Id único em features", feats["Id"].is_unique, f"{feats['Id'].nunique():,}")
     chk("mesmo conjunto de Ids", set(meta["Id"]) == set(feats["Id"]))
     chk("Response sem nulos", meta["Response"].notna().all())
     chk("taxa de falha ~0.58%", 0.004 < meta["Response"].mean() < 0.008,
-        f"{meta['Response'].mean():.4%}")
+        f"{meta['Response'].mean():.4%}", escala=True)
     chk("t_min monotônico após sort", meta["t_min"].is_monotonic_increasing)
     chk("≥ 15 semanas de histórico", meta["semana"].nunique() >= 15,
-        f"{meta['semana'].nunique()} semanas")
+        f"{meta['semana'].nunique()} semanas", escala=True)
     chk("colunas vis_ presentes", sum(c.startswith("vis_") for c in meta.columns) > 50,
         f"{sum(c.startswith('vis_') for c in meta.columns)} estações")
 
     # a checagem que pega o bug mais caro: falha concentrada numa semana só
     por_sem = meta.groupby("semana", observed=True)["Response"].mean()
     chk("falha distribuída no tempo", por_sem.std() < por_sem.mean() * 2,
-        f"cv={por_sem.std() / max(por_sem.mean(), 1e-9):.2f}")
+        f"cv={por_sem.std() / max(por_sem.mean(), 1e-9):.2f}", escala=True)
     return ok
 
 
@@ -361,7 +413,7 @@ def main() -> int:
                                    chunk=args.chunk, limite_linhas=args.amostra)
     feats = carregar_features(f_num, features, chunk=args.chunk, limite_linhas=args.amostra)
 
-    if not verificar(meta, feats):
+    if not verificar(meta, feats, amostra=args.amostra is not None):
         print("\n❌ verificação falhou. NÃO publique estes arquivos.", file=sys.stderr)
         return 1
 
@@ -378,11 +430,23 @@ def main() -> int:
         log(f"  {p.name:<32} {p.stat().st_size / 1e6:>7.1f} MB")
     log(f"  tempo total: {(time.perf_counter() - t0) / 60:.1f} min")
     log("=" * 58)
-    log("\nPróximo passo — publicar no GitHub Releases (NÃO no repo git):")
-    log("  gh release create dados-v1 \\")
+    if args.amostra:
+        log("\n⚠️  ARQUIVOS DE AMOSTRA — não publique. Rode sem --amostra.")
+        return 0
+
+    log("\nPróximo passo — publicar no GitHub Releases (NÃO no repo git).")
+    log("A tag `dados-v1` JÁ EXISTE, com o contrato de referência anexado.")
+    log("`gh release create` falharia; o comando certo é `upload`:")
+    log("")
+    log("  gh release upload dados-v1 \\")
+    log(f"     {p_meta} {p_feat} --clobber")
+    log("")
+    log("Se algum dia precisar recriar a tag do zero:")
+    log("  gh release create dados-v2 \\")
     log(f"     {p_meta} {p_feat} data/detector_config_referencia_v1.json \\")
     log('     --title "Dados derivados — PyBR 2026" \\')
     log('     --notes "Bosch pré-processado. Ver scripts/preprocess_bosch.py."')
+    log("  ...e atualize TAG_DADOS em src/driftkit/data.py e setup_colab.py.")
     return 0
 
 
