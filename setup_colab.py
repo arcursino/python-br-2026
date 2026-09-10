@@ -294,33 +294,66 @@ for nome, _para, mb in ARQUIVOS_DADOS:
 # =============================================================================
 print("[5/5] diagnóstico\n")
 
+# Versão MÍNIMA aceitável de cada pacote — não prefixo de string.
+#
+# A versão anterior comparava prefixos (`v.startswith("1")`) e envelheceu
+# sozinha: quando o Colab passou pyarrow de 18.1.0 para 23.0.1, `"23"` deixou
+# de começar com `"1"` e o setup pintou 🔴 num ambiente perfeitamente saudável.
+#
+# É a tese do Bloco III aplicada ao nosso próprio setup: um limiar FIXO herdado
+# não vira falso negativo — vira falso POSITIVO, e quem paga é o primeiro slide
+# do tutorial. Trocamos o prefixo por um piso semântico: só reprova o que é
+# velho DEMAIS, e nunca reprova por ser novo.
+#
 # obrigatórios: ausência é FALHA
 OBRIGATORIOS = {
-    "numpy": "1.26|2.",
-    "pandas": "2.",
-    "scipy": "1.",
-    "scikit-learn": "1.",
-    "pyarrow": "1",
-    "typer": "0.",
-    "pytest": "8.",
+    "numpy": "1.26",
+    "pandas": "2.0",
+    "scipy": "1.10",
+    "scikit-learn": "1.3",
+    "pyarrow": "14.0",
+    "typer": "0.12",
+    "pytest": "8.0",
 }
 # opcionais: ausência é AVISO
 OPCIONAIS = {
-    "river": "0.",
-    "evidently": "0.",
+    "river": "0.21",
+    "evidently": "0.4",
 }
 
-print(f"  {'pacote':<26}{'':<3}{'versão'}")
+
+def _versao_ok(instalada: str, minima: str) -> bool:
+    """`instalada >= minima`, comparando número a número.
+
+    Usa `packaging` quando disponível (trata rc/dev/post corretamente) e cai
+    num parser ingênuo de inteiros quando não — o setup não pode depender de
+    um extra para conseguir dizer se o ambiente está bom.
+    """
+    try:
+        from packaging.version import Version
+
+        return Version(instalada) >= Version(minima)
+    except Exception:  # noqa: BLE001
+        def _t(v: str) -> tuple[int, ...]:
+            partes = []
+            for p in v.split(".")[:3]:
+                digitos = "".join(c for c in p if c.isdigit())
+                partes.append(int(digitos) if digitos else 0)
+            return tuple(partes)
+
+        return _t(instalada) >= _t(minima)
+
+print(f"  {'pacote':<26}{'':<3}{'versão'}   (mínimo exigido)")
 print("  " + "-" * 46)
 for grupo, obrigatorio in ((OBRIGATORIOS, True), (OPCIONAIS, False)):
-    for pkg, prefixos in grupo.items():
+    for pkg, minima in grupo.items():
         try:
             v = md.version(pkg)
-            ok = any(v.startswith(p) for p in prefixos.split("|"))
+            ok = _versao_ok(v, minima)
             icone = "✅" if ok else "⚠️"
             if not ok:
                 (_falhas if obrigatorio else _avisos).append(
-                    f"{pkg} {v} (esperado ~{prefixos})"
+                    f"{pkg} {v} é anterior ao mínimo exigido ({minima})"
                 )
         except md.PackageNotFoundError:
             v = "ausente"
@@ -330,7 +363,7 @@ for grupo, obrigatorio in ((OBRIGATORIOS, True), (OPCIONAIS, False)):
             else:
                 _avisos.append(f"{pkg} ausente (opcional)")
         trava = " 🔒" if pkg in STACK_BINARIA else ""
-        print(f"  {pkg:<26}{icone:<3}{v}{trava}")
+        print(f"  {pkg:<26}{icone:<3}{v}{trava:<3}  (≥ {minima})")
 
 print()
 print(f"  {'dado':<36}{'':<3}{'tamanho'}")
