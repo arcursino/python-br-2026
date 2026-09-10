@@ -156,9 +156,19 @@ def calibrar(
     # ---- o piso tem forma fechada: confira o medido contra o previsto -------
     n_meia = len(ref) // 2
     previsto = piso_analitico(n_meia, n_meia, bins=10)
+    # Dois números com forma fechada aparecem nesta tela e NÃO são o mesmo:
+    #   - este aqui: o piso de UMA feature isolada;
+    #   - piso['piso_analitico']: o mesmo cálculo corrigido para as k features
+    #     monitoradas simultaneamente (Bonferroni).
+    # O rótulo diz qual é qual — a diferença entre eles É o preço estatístico
+    # de monitorar seis features em vez de uma.
     _eco(
-        f"\n   piso ANALÍTICO previsto      {previsto:.6f}"
-        f"   [χ²₀.₉₅(B-1)·(1/n+1/m)]"
+        f"\n   piso teórico POR FEATURE     {previsto:.6f}"
+        f"   [χ²₀.₉₅(B-1)·(1/n+1/m)], sem Bonferroni"
+    )
+    _eco(
+        f"   o contrato grava       {piso['piso_analitico']:.6f}"
+        f"   — o mesmo cálculo corrigido para {piso['k_features_num']} features."
     )
     _eco(
         f"   o limiar 0.1 que você herdou é o piso de uma janela de "

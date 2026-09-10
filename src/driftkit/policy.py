@@ -156,6 +156,7 @@ class PoliticaRetreino:
     contextos_conhecidos: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     _historico: list[bool] = field(default_factory=list, repr=False)
+    _causas: list[str] = field(default_factory=list, repr=False)
     _ultimo_retreino: int | None = field(default=None, repr=False)
 
     # =========================================================================
@@ -319,6 +320,7 @@ class PoliticaRetreino:
             atual, rel, dia=dia, auc_global=auc_global, auc_segmento=auc_segmento
         )
         ev["evidencia_causa"] = evidencia
+        self._causas.append(causa)
 
         # --- guarda 2: contexto conhecido -----------------------------------
         contexto_ok = causa != Causa.NEGOCIO
@@ -373,6 +375,41 @@ class PoliticaRetreino:
                 guardas, ev, dia, segmento,
             )
 
+        # --- guarda 1b: o DIAGNÓSTICO também precisa persistir --------------
+        # A guarda 1 exige que o ALARME persista; nada exigia que a CAUSA
+        # persistisse. E o diagnóstico é feito por janela: quando o número de
+        # features em alarme oscila por ruído amostral (2 → 1 → 2 dentro do
+        # mesmo TC-3), a assinatura de HARDWARE deixa de fechar e a causa cai
+        # em MODELO — que é a causa RESIDUAL, o que sobra quando nenhuma
+        # assinatura física se confirma.
+        #
+        # O efeito observado era um `RETREINAR` isolado no meio de dois
+        # `BLOQUEAR`, dentro de um único regime físico. Não é caso de borda:
+        # é instabilidade do classificador de causa.
+        #
+        # A correção é assimétrica de propósito. MODELO é, ao mesmo tempo, a
+        # única causa que AUTORIZA gasto e a única definida por EXCLUSÃO.
+        # Então é a única que precisa se repetir para ser aceita:
+        #
+        #     bloquear por suspeita é barato.
+        #     retreinar por dúvida, não.
+        #
+        # Causas com assinatura POSITIVA (pipeline, hardware, negócio) agem na
+        # primeira janela — elas têm evidência própria, não precisam de aval.
+        causa_confirmada = self._causas[-2:].count(Causa.MODELO) >= 2
+        guardas["1b_causa_confirmada"] = causa_confirmada
+        ev["causa_janela_anterior"] = (
+            self._causas[-2] if len(self._causas) >= 2 else None
+        )
+        if causa == Causa.MODELO and not causa_confirmada:
+            return Decisao(
+                Acao.NADA, causa,
+                "diagnóstico `modelo` não confirmado em duas janelas consecutivas "
+                f"(anterior: `{ev['causa_janela_anterior']}`). `modelo` é a causa "
+                "residual — aguardando confirmação antes de autorizar gasto.",
+                guardas, ev, dia, segmento,
+            )
+
         # --- guarda 4: shadow validation ------------------------------------
         if ganho_shadow is not None:
             passou = ganho_shadow >= self.ganho_minimo
@@ -409,6 +446,7 @@ class PoliticaRetreino:
     # =========================================================================
     def resetar_historico(self) -> None:
         self._historico.clear()
+        self._causas.clear()
         self._ultimo_retreino = None
 
     @classmethod
@@ -433,6 +471,7 @@ def tabela_das_quatro_guardas(decisao: Decisao) -> pd.DataFrame:
     """
     rotulos = {
         "1_persistencia": "1. Persistência (k de n)",
+        "1b_causa_confirmada": "1b. Diagnóstico confirmado em 2 janelas",
         "2_contexto": "2. Contexto operacional conhecido",
         "3_magnitude": "3. Magnitude sobre o piso medido",
         "4_shadow": "4. Shadow validation (challenger > champion)",
