@@ -57,8 +57,12 @@ __all__ = [
 # =============================================================================
 #  CONFIGURAÇÃO — ajuste para o seu repositório
 # =============================================================================
-GH_USER = os.environ.get("DRIFTKIT_GH_USER", "SEU_USUARIO")
-GH_REPO = os.environ.get("DRIFTKIT_GH_REPO", "pybr2026-drift")
+# Estes três valores TÊM que casar com os do setup_colab.py. Ficaram como
+# placeholder de template ("SEU_USUARIO/pybr2026-drift") por uma versão, e o
+# sintoma foi um 404 no meio do notebook — com uma URL que nem existe. O
+# setup estava certo; este módulo tem as suas próprias constantes.
+GH_USER = os.environ.get("DRIFTKIT_GH_USER", "arcursino")
+GH_REPO = os.environ.get("DRIFTKIT_GH_REPO", "python-br-2026")
 TAG_DADOS = os.environ.get("DRIFTKIT_TAG_DADOS", "dados-v1")
 
 URL_BASE_RELEASE = f"https://github.com/{GH_USER}/{GH_REPO}/releases/download/{TAG_DADOS}"
@@ -127,10 +131,24 @@ def _baixar(nome: str, *, forcar: bool = False, silencioso: bool = False) -> Pat
     )
     if r.returncode or not tmp.exists():
         tmp.unlink(missing_ok=True)
+        # 404 e "sem internet" pedem ações DIFERENTES, e a mensagem tem que
+        # dizer qual é qual — senão o participante tenta de novo três vezes
+        # contra um asset que nunca foi publicado.
+        erro = (r.stderr or "")
+        e404 = "404" in erro
+        diag = (
+            f"o asset `{nome}` NÃO existe no Release `{TAG_DADOS}` de\n"
+            f"  {GH_USER}/{GH_REPO} (HTTP 404). Isto não é problema da sua\n"
+            "  conexão: o arquivo não foi publicado. Quem mantém o repositório\n"
+            "  precisa anexá-lo ao Release."
+            if e404 else
+            "download interrompido (rede, proxy ou rate limit). Tente de novo."
+        )
         raise RuntimeError(
             f"falha ao baixar {nome}.\n"
             f"  url: {url}\n"
-            f"  {r.stderr[-500:]}\n\n"
+            f"  DIAGNÓSTICO: {diag}\n"
+            f"  {erro[-300:]}\n\n"
             "Plano B: peça o pendrive ao monitor e suba o arquivo pelo painel\n"
             f"de arquivos do Colab (📁 na lateral) para: {dir_dados()}"
         )
@@ -210,7 +228,11 @@ def carregar_contrato_v1() -> dict:
     fechou o Colab entre os blocos, ele NÃO fica travado. Usa o contrato de
     referência e é AVISADO de que os limiares são da execução do instrutor.
     """
-    proprio = dir_dados() / "detector_config.json"
+    # importado, não digitado: era a segunda cópia da string e a primeira
+    # fonte de divergência silenciosa entre os dois módulos.
+    from .state import NOME_PADRAO
+
+    proprio = dir_dados() / NOME_PADRAO
     if proprio.exists():
         cfg = json.loads(proprio.read_text(encoding="utf-8"))
         print(f"contrato: {cfg['versao']} — origem: SUA execução do Bloco II-A ✅")
