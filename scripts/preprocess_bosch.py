@@ -183,8 +183,12 @@ def construir_meta(
 
     # --- eixo temporal --------------------------------------------------------
     meta["duracao"] = (meta["t_max"] - meta["t_min"]).astype(np.float32)
-    meta["semana"] = np.floor(meta["t_min"] * UNIDADE_TEMPO_SEMANAS).astype("Int32")
-    meta["quinzena"] = (meta["semana"] // 2).astype("Int32")
+
+    # Calcula as semanas/quinzenas e converte os nulos (peças sem timestamp) para -1
+    semana_float = np.floor(meta["t_min"] * UNIDADE_TEMPO_SEMANAS)
+    meta["semana"] = pd.Series(semana_float).fillna(-1).astype(np.int32)
+    meta["quinzena"] = (meta["semana"] // 2).astype(np.int32)
+
 
     # CORREÇÃO: Ordena por t_min e usa o Id como desempate estrito.
     # Peças sem data (NaN) vão obrigatoriamente para o final do arquivo.
