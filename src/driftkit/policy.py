@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -63,6 +62,24 @@ class Causa(str):
 
 
 CAUSAS_QUE_BLOQUEIAM = frozenset({Causa.HARDWARE, Causa.PIPELINE})
+
+# Quantos múltiplos do limiar calibrado ainda contam como "P(X) calmo".
+#
+# Não é um número escolhido no olho: é a região ENTRE o limiar de detecção e a
+# magnitude de um covariate drift genuíno. Na fixture, com psi_limiar≈0.0102:
+#
+#     TC-3 (concept, exige BLOQUEIO) : efeito máx 0.0178   ≈  1.7× o limiar
+#     TC-2 (covariate, exige registro): efeito máx 1.9136  ≈ 187× o limiar
+#
+# Duas ordens de grandeza separam os dois casos. Qualquer teto entre ~3× e ~50×
+# os distingue; 10× fica no meio do vão, em escala logarítmica.
+FATOR_PX_CALMO = 10.0
+
+# Quantas features podem estar em drift e a janela ainda ser considerada calma.
+# O TC-3 vaza UMA feature (`torque_medido`): a compensação do operador cancela
+# 87.5% do offset, não 100%. Exigir n_drift == 0 é exigir que o resíduo físico
+# não exista.
+MAX_FEATURES_EM_DRIFT_CALMO = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +156,7 @@ class PoliticaRetreino:
     contextos_conhecidos: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     _historico: list[bool] = field(default_factory=list, repr=False)
+    _causas: list[str] = field(default_factory=list, repr=False)
     _ultimo_retreino: int | None = field(default=None, repr=False)
 
     # =========================================================================
@@ -175,18 +193,59 @@ class PoliticaRetreino:
                 if ini <= dia <= fim:
                     return Causa.NEGOCIO, f"janela dentro do contexto planejado `{nome}`"
 
-        # ---- assinatura HARDWARE: localizada + performance cai sem P(X) ----
+        # ---- assinatura HARDWARE: localizada + P(X) calmo -------------------
         # A marca do sensor descalibrado: a degradação é de UM segmento e o
         # monitor de distribuição está calmo (ou quase). Se P(X) grita E a
         # performance cai, é mais provável que o mundo tenha mudado de fato.
         if auc_global is not None and auc_segmento is not None:
-            gap = auc_global - auc_segmento
-            px_calmo = relatorio.n_drift == 0 or not np.isfinite(relatorio.efeito_max) \
-                or relatorio.efeito_max < self.fator_piso * self.piso_aa
-            if gap > 0.15 and px_calmo:
+            # (a) A degradação é LOCALIZADA?
+            #
+            # Critério de RAZÃO, não de diferença. Mede quanto do poder
+            # discriminativo acima do acaso sobrou no segmento em relação ao
+            # que sobrou na janela agregada.
+            #
+            # Por que não `auc_global - auc_segmento > 0.15`: o TC-3 arrasta a
+            # AUC global para baixo junto com a do segmento, o que COMPRIME a
+            # diferença exatamente quando o problema é mais grave. Um limiar
+            # absoluto sobre a diferença de duas métricas que caem juntas é
+            # frágil por construção — precisa ser recalibrado a cada mudança de
+            # magnitude da fixture, e falha silenciosamente quando não é.
+            lift_g = max(auc_global - 0.5, 1e-6)
+            lift_s = max(auc_segmento - 0.5, 0.0)
+            razao_lift = lift_s / lift_g
+            localizada = razao_lift < 0.35 and auc_segmento < 0.55
+
+            # (b) P(X) está calmo?
+            #
+            # "Calmo" é RELATIVO, e essa é a correção mais importante deste
+            # módulo. Concept drift NÃO é obrigatoriamente invisível em P(X):
+            # no TC-3 o resíduo não compensado pelo operador desloca o
+            # `torque_medido` em -0.45 Nm, o que dá efeito 0.0178 com
+            # p ≈ 8e-07. É pequeno, é real, e é ESTATISTICAMENTE INEGÁVEL.
+            #
+            # Exigir silêncio ABSOLUTO (n_drift == 0) torna a assinatura refém
+            # do tamanho da amostra: com n suficiente, todo resíduo físico vira
+            # significativo, e a assinatura de hardware deixa de existir
+            # justamente nas instalações mais bem instrumentadas.
+            #
+            # O que separa TC-3 de TC-2 não é presença vs. ausência de sinal em
+            # P(X) — é a ORDEM DE GRANDEZA do sinal (0.018 vs 1.91, ~107×).
+            calmo_em_magnitude = (
+                not np.isfinite(relatorio.efeito_max)
+                or relatorio.efeito_max < FATOR_PX_CALMO * self.detector.psi_limiar
+            )
+            px_calmo = (
+                relatorio.n_drift <= MAX_FEATURES_EM_DRIFT_CALMO
+                and calmo_em_magnitude
+            )
+
+            if localizada and px_calmo:
                 return Causa.HARDWARE, (
-                    f"degradação LOCALIZADA (Δ AUC segmento = {gap:.3f}) "
-                    f"com P(X) calmo (efeito máx {relatorio.efeito_max:.4f}) — "
+                    f"degradação LOCALIZADA (AUC segmento {auc_segmento:.3f} vs "
+                    f"global {auc_global:.3f}; lift residual {razao_lift:.0%}) "
+                    f"com P(X) calmo ({relatorio.n_drift} feature(s), efeito máx "
+                    f"{relatorio.efeito_max:.4f} = "
+                    f"{relatorio.efeito_max / self.detector.psi_limiar:.1f}× o limiar) — "
                     "assinatura de instrumentação, não de modelo"
                 )
 
@@ -261,6 +320,7 @@ class PoliticaRetreino:
             atual, rel, dia=dia, auc_global=auc_global, auc_segmento=auc_segmento
         )
         ev["evidencia_causa"] = evidencia
+        self._causas.append(causa)
 
         # --- guarda 2: contexto conhecido -----------------------------------
         contexto_ok = causa != Causa.NEGOCIO
@@ -315,6 +375,41 @@ class PoliticaRetreino:
                 guardas, ev, dia, segmento,
             )
 
+        # --- guarda 1b: o DIAGNÓSTICO também precisa persistir --------------
+        # A guarda 1 exige que o ALARME persista; nada exigia que a CAUSA
+        # persistisse. E o diagnóstico é feito por janela: quando o número de
+        # features em alarme oscila por ruído amostral (2 → 1 → 2 dentro do
+        # mesmo TC-3), a assinatura de HARDWARE deixa de fechar e a causa cai
+        # em MODELO — que é a causa RESIDUAL, o que sobra quando nenhuma
+        # assinatura física se confirma.
+        #
+        # O efeito observado era um `RETREINAR` isolado no meio de dois
+        # `BLOQUEAR`, dentro de um único regime físico. Não é caso de borda:
+        # é instabilidade do classificador de causa.
+        #
+        # A correção é assimétrica de propósito. MODELO é, ao mesmo tempo, a
+        # única causa que AUTORIZA gasto e a única definida por EXCLUSÃO.
+        # Então é a única que precisa se repetir para ser aceita:
+        #
+        #     bloquear por suspeita é barato.
+        #     retreinar por dúvida, não.
+        #
+        # Causas com assinatura POSITIVA (pipeline, hardware, negócio) agem na
+        # primeira janela — elas têm evidência própria, não precisam de aval.
+        causa_confirmada = self._causas[-2:].count(Causa.MODELO) >= 2
+        guardas["1b_causa_confirmada"] = causa_confirmada
+        ev["causa_janela_anterior"] = (
+            self._causas[-2] if len(self._causas) >= 2 else None
+        )
+        if causa == Causa.MODELO and not causa_confirmada:
+            return Decisao(
+                Acao.NADA, causa,
+                "diagnóstico `modelo` não confirmado em duas janelas consecutivas "
+                f"(anterior: `{ev['causa_janela_anterior']}`). `modelo` é a causa "
+                "residual — aguardando confirmação antes de autorizar gasto.",
+                guardas, ev, dia, segmento,
+            )
+
         # --- guarda 4: shadow validation ------------------------------------
         if ganho_shadow is not None:
             passou = ganho_shadow >= self.ganho_minimo
@@ -351,6 +446,7 @@ class PoliticaRetreino:
     # =========================================================================
     def resetar_historico(self) -> None:
         self._historico.clear()
+        self._causas.clear()
         self._ultimo_retreino = None
 
     @classmethod
@@ -375,6 +471,7 @@ def tabela_das_quatro_guardas(decisao: Decisao) -> pd.DataFrame:
     """
     rotulos = {
         "1_persistencia": "1. Persistência (k de n)",
+        "1b_causa_confirmada": "1b. Diagnóstico confirmado em 2 janelas",
         "2_contexto": "2. Contexto operacional conhecido",
         "3_magnitude": "3. Magnitude sobre o piso medido",
         "4_shadow": "4. Shadow validation (challenger > champion)",

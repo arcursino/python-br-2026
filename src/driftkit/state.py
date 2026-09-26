@@ -24,6 +24,7 @@ desse erro.
 from __future__ import annotations
 
 import json
+import numpy as np
 import platform
 import sys
 from dataclasses import asdict, dataclass, field
@@ -219,6 +220,8 @@ def comparar_regimes(
     v1, v2 : dict
         Saídas de `DriftDetector.calibrar_piso()` nos dois regimes.
     """
+    from .detectors import n_equivalente   # ← import local, evita ciclo
+    
     def _extrai(v: dict) -> dict:
         return {
             "n": v.get("n_referencia"),

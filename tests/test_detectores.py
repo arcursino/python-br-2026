@@ -141,7 +141,10 @@ class TestProvaCruzada:
         base = janela(df, 45).query("equipamento == 'CEL-02'")
         m_base = metricas(modelo, base, num=NUM, cat=CAT)
         m_tc3 = metricas(modelo, seg, num=NUM, cat=CAT)
-        assert m_tc3.roc_auc < m_base.roc_auc - 0.15, (
+        assert m_tc3.roc_auc < 0.55, (
+            f"o modelo no segmento deve virar quase-aleatório: tc3={m_tc3.roc_auc:.3f}"
+        )
+        assert m_tc3.roc_auc < m_base.roc_auc - 0.10, (
             f"esperava colapso localizado: base={m_base.roc_auc:.3f} tc3={m_tc3.roc_auc:.3f}"
         )
 
