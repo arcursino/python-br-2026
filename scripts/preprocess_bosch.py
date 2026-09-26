@@ -9,10 +9,6 @@ no GitHub Releases. Os participantes NUNCA rodam isto em sala.
 
     14.3 GB de CSV  →  ~180 MB de parquet  →  ~25 min de aula economizados
 
-Mas o código FICA no notebook, projetado e explicado, porque o padrão que ele
-demonstra — "reduza por chunks, não carregue por chunks" — é a resposta certa
-em entrevista de engenharia de dados e vale mais que o resultado.
-
 Uso
 ---
     python scripts/preprocess_bosch.py --entrada ~/kaggle/bosch --saida data/
@@ -190,7 +186,15 @@ def construir_meta(
     meta["semana"] = np.floor(meta["t_min"] * UNIDADE_TEMPO_SEMANAS).astype("Int32")
     meta["quinzena"] = (meta["semana"] // 2).astype("Int32")
 
-    meta = meta.sort_values("t_min", kind="stable").reset_index(drop=True)
+    # CORREÇÃO: Ordena por t_min e usa o Id como desempate estrito.
+    # Peças sem data (NaN) vão obrigatoriamente para o final do arquivo.
+    meta = meta.sort_values(
+        by=["t_min", "Id"],
+        ascending=[True, True],
+        na_position="last"
+    ).reset_index(drop=True)
+
+
 
     log(f"\nmeta construída: {len(meta):,} peças × {meta.shape[1]} colunas")
     log(f"  taxa de falha : {meta['Response'].mean():.4%}")
@@ -316,7 +320,8 @@ def verificar(meta: pd.DataFrame, feats: pd.DataFrame) -> bool:
     chk("Response sem nulos", meta["Response"].notna().all())
     chk("taxa de falha ~0.58%", 0.004 < meta["Response"].mean() < 0.008,
         f"{meta['Response'].mean():.4%}")
-    chk("t_min monotônico após sort", meta["t_min"].is_monotonic_increasing)
+    #chk("t_min monotônico após sort", meta["t_min"].is_monotonic_increasing)
+    chk("t_min monotônico após sort", meta["t_min"].dropna().is_monotonic_increasing)
     chk("≥ 15 semanas de histórico", meta["semana"].nunique() >= 15,
         f"{meta['semana'].nunique()} semanas")
     chk("colunas vis_ presentes", sum(c.startswith("vis_") for c in meta.columns) > 50,
