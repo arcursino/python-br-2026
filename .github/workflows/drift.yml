@@ -16,9 +16,12 @@
 name: monitor de drift
 
 on:
-  schedule:
-    - cron: "0 6 * * *"        # todo dia às 06:00 UTC — o "automatizado" da ementa
-  workflow_dispatch:
+  # Agendamento DESLIGADO: rodava todo dia às 06:00 UTC sem janela para avaliar
+  # e falhava (exit 2), gerando e-mail diário. Para religar depois do evento,
+  # descomente as duas linhas abaixo E garanta que data/janela_atual.parquet exista.
+  # schedule:
+  #   - cron: "0 6 * * *"
+  workflow_dispatch:          # roda só quando você clica em "Run workflow"
     inputs:
       janela:
         description: "Caminho do parquet da janela a avaliar"
@@ -37,14 +40,14 @@ concurrency:
 
 jobs:
   monitorar:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04     # fixo: evita a migração para Ubuntu 26 perto do evento
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: instalar uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
 
@@ -57,21 +60,31 @@ jobs:
       - name: suíte do detector
         run: uv run pytest -q -m "not lento and not requer_bosch and not mercado"
 
-      - name: baixar dados da janela
+      - name: preparar contrato e conferir a janela
+        id: janela
         run: |
           mkdir -p data
           if [ ! -f "data/detector_config.json" ]; then
             uv run driftkit calibrar --saida data/detector_config.json
           fi
+          JANELA="${{ inputs.janela || 'data/janela_atual.parquet' }}"
+          if [ -f "$JANELA" ]; then
+            echo "existe=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "existe=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Janela não encontrada::$JANELA não existe no repositório. Nada a medir; job encerrado sem falha."
+          fi
 
       # -- medir (não decide) --------------------------------------------------
       - name: medir drift
+        if: steps.janela.outputs.existe == 'true'
         run: uv run driftkit check "${{ inputs.janela || 'data/janela_atual.parquet' }}"
 
       # -- decidir: o exit code É a política -----------------------------------
       #  0 nada | 10 retreinar | 20 BLOQUEAR | 30 insuficiente
       - name: decidir
         id: decisao
+        if: steps.janela.outputs.existe == 'true'
         continue-on-error: true      # 20 não é falha de build, é uma DECISÃO
         run: |
           set +e
@@ -180,7 +193,8 @@ jobs:
           git push || true
 
       - name: falhar o job apenas em erro real
-        if: steps.decisao.outputs.exit_code != '0' &&
+        if: steps.janela.outputs.existe == 'true' &&
+            steps.decisao.outputs.exit_code != '0' &&
             steps.decisao.outputs.exit_code != '10' &&
             steps.decisao.outputs.exit_code != '20' &&
             steps.decisao.outputs.exit_code != '30'
