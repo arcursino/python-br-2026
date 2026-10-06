@@ -78,7 +78,7 @@ tudo = [
 driftkit = "driftkit.cli:app"
 
 [project.urls]
-Repositorio = "https://github.com/SEU_USUARIO/pybr2026-drift"
+Repositorio = "https://github.com/arcursino/python-br-2026"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/driftkit"]
